@@ -46,8 +46,9 @@ hybridsearch/
   index/
     worker.py                index_basic / index_enrichment (2단계 색인)
     run_from_manifest.py     Stage 1: manifest → OpenSearch 색인 드라이버
-docker-compose.yml           API 컨테이너 (.env 로 AWS Managed OpenSearch + S3 에 연결)
-files-by-claude/             참고용 스캐폴드 (현재 패키지가 이걸 기반으로 발전)
+main.py                      Query Coordinator (FastAPI): 정규화→캐시→임베딩→hybrid 쿼리→매핑
+streamlit_app.py             Streamlit FE (8501): 검색창 + 결과 그리드, 코디네이터 /search만 호출
+docker-compose.yml           app(FastAPI 8000) + fe(Streamlit 8501) — .env 로 Managed OpenSearch + S3 연결
 ```
 
 ## 사전 준비
@@ -96,8 +97,47 @@ uv run python -m hybridsearch.index.run_from_manifest
 - 사이드카에 `caption_vector`가 이미 있으면 **재임베딩 없이 재사용**한다(모델 재실행 불필요).
 - 인덱스 매핑/파이프라인만 따로 만들고 싶으면:
   `uv run python -m hybridsearch.search.index --recreate`
+- **색인은 멱등하다.** `image_id` 기준 upsert(`doc_as_upsert`)라 재실행해도 중복이 안 생기고,
+  `--recreate`로 인덱스를 날려도 manifest + S3 사이드카로 똑같이 복구된다. 실수해도 다시 돌리면 됨.
 
-### 4) 이미지 확인용 정적 서버 (local 백엔드일 때)
+> **본 색인 전 드라이런 (권장):** EC2(VPC 안)에서 도커로 돌릴 때는 `./run.sh smoke`로 전체
+> 경로(manifest → S3 사이드카 → 임베딩 → OpenSearch)를 소량으로 먼저 검증한다. 버려도 되는
+> 인덱스(`images_smoke`)에 앞 `SMOKE_N`(기본 20)건만 색인했다가 지우므로 **실제 `images`
+> 인덱스는 건드리지 않는다.** 컨테이너 안 IMDS 자격증명(S3)과 OpenSearch 연결을 한 번에 확인하는 용도.
+>
+> ```bash
+> ./run.sh up && ./run.sh smoke      # 통과하면:
+> ./run.sh index --recreate
+> ```
+
+### 4) 검색: Query Coordinator(FastAPI) + Streamlit FE
+
+`./run.sh up`이 두 컨테이너를 같이 띄운다 — **app**(코디네이터, 8000)과 **fe**(Streamlit, 8501).
+
+```bash
+./run.sh up                       # app(8000) + fe(8501) 기동
+# 브라우저로 http://localhost:8501 → 검색창에 키워드 입력
+./run.sh search "two dogs playing on the beach"   # CLI로 직접 호출 (curl)
+```
+
+흐름: **Streamlit(8501) → 코디네이터 `/search`(8000) → OpenSearch hybrid + `hybrid-pipeline`**.
+코디네이터는 요청마다 `q 정규화 → 결과캐시 조회 → (캐시미스면) 워커와 동일한 MiniLM으로 q 임베딩
+→ hybrid 쿼리(match on `description` + knn on `caption_vector`) → hits를 `{image_url, description, score}`로 매핑`을 한다.
+
+- **임베딩 일관성**: 코디네이터의 임베딩 모델·정규화(`normalize_embeddings=True`)가 색인 워커와
+  100% 동일해야 벡터 공간이 일치한다(`hybridsearch/embedding.py` 공유). 어긋나면 kNN이 무의미해진다.
+- **모델 warm-load**: 코디네이터 기동 시 1회 로드. 요청마다 재로딩하지 않는다.
+- **캐시**: 정규화한 `(q, k, weights)`로 결과 LRU + `q→임베딩` LRU(재인코딩 회피). 10K 규모는 인메모리로 충분,
+  확장 시 Redis로 교체.
+- **가중치 조정(옵션)**: FE 사이드바에서 BM25/시맨틱 가중치를 켜면 `/search?w_bm25=..&w_knn=..`로
+  전달되고, 코디네이터가 해당 가중치로 **인라인 파이프라인**을 만들어 검색한다(명시 안 하면 명명 파이프라인 사용).
+- **enriched 안 된 문서**는 `caption_vector`가 없어 kNN에 자동으로 안 잡힌다.
+
+> API만 따로 띄우려면: `uv run uvicorn main:app --host 0.0.0.0 --port 8000`
+> FE만 따로 띄우려면: `uv run streamlit run streamlit_app.py --server.port 8501`
+> (FE는 `HS_API_URL`이 가리키는 코디네이터를 호출 — 기본 `http://localhost:8000`)
+
+### 5) 이미지 확인용 정적 서버 (local 백엔드일 때)
 
 ```bash
 python -m http.server 8000 -d ./data/images   # image_url = http://localhost:8000/images/<key>
@@ -176,6 +216,10 @@ OPENSEARCH_PASSWORD=<master-password>
 | `HS_SEARCH_PIPELINE` | `hybrid-pipeline` | 하이브리드 search pipeline 이름 |
 | `HS_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | 임베딩 모델 |
 | `HS_EMBEDDING_DIM` | `384` | 임베딩 차원 (인덱스 매핑과 일치해야 함) |
+| `HS_API_URL` | `http://localhost:8000` | FE가 호출할 코디네이터 주소 (compose에선 `http://app:8000`) |
+| `HS_EMBED_CACHE_SIZE` | `1024` | q→임베딩 LRU 캐시 크기 |
+| `HS_QUERY_CACHE_SIZE` | `1024` | (q, k, 가중치)→결과 LRU 캐시 크기 |
+| `HS_BM25_WEIGHT` / `HS_KNN_WEIGHT` | `0.4` / `0.6` | `/search`에 가중치를 넘길 때 쓰는 인라인 파이프라인 기본값 |
 
 ### `.env` 예시
 
@@ -202,7 +246,30 @@ OPENSEARCH_USE_SSL=true
   `l2`로 교체한다(임베딩이 정규화돼 있어 순위는 동일). 변경 시 인덱스 재생성(`--recreate`) 필요.
 - 하이브리드 융합: 각 서브쿼리 점수를 min-max 정규화 후 가중 산술평균(BM25:kNN = 0.4:0.6).
 
+### 융합 방식: normalization vs RRF (왜 normalization인가)
+
+하이브리드 융합은 크게 두 갈래다 — **score normalization**(현행, `normalization-processor`)과
+**RRF**(Reciprocal Rank Fusion, `score-ranker-processor`). 이 프로젝트는 **normalization을 유지**한다.
+
+| | normalization (현행) | RRF |
+|---|---|---|
+| 합치는 기준 | 각 서브쿼리의 **raw 점수** (min-max 정규화 후 가중평균) | 점수 무시, **순위(rank)만** → `Σ 1/(k+rank)` |
+| 가중치 | 있음 (`0.4 / 0.6`, 요청별 조정 가능) | 기본적으로 의미 약함 (순위 기반) |
+| 튜닝 | 가중치·정규화 튜닝 필요 | 거의 불필요 (스케일 차이에 robust) |
+| OpenSearch | `normalization-processor` (성숙·기본) | `score-ranker-processor` (**2.19+** 필요) |
+
+선택 사유:
+1. **버전/성숙도** — AWS Managed OpenSearch에서 `normalization-processor`는 오래 검증된 기본 방식이고,
+   RRF(`score-ranker-processor`)는 2.19+에서만 동작해 도메인 버전에 종속된다(버전 리스크 회피).
+2. **가중치 조정 기능 유지** — FE 사이드바의 BM25/시맨틱 가중치 슬라이더(`/search?w_bm25=..&w_knn=..`)는
+   점수 가중평균인 normalization에서만 의미가 있다. RRF로 가면 이 기능이 무력화된다.
+3. **점수 정보 보존** — normalization은 점수 크기를 살려 융합하지만 RRF는 순위만 남기고 크기를 버린다.
+
+> RRF는 "튜닝 없이도 무난하게 동작하는" 견고함이 장점이라 가중치 조정이 불필요한 경우 좋은 선택이다.
+> 전환하려면 도메인 엔진 버전(2.19+) 확인 후 `hybridsearch/search/index.py`의 `SEARCH_PIPELINE_BODY`를
+> `score-ranker-processor`(technique `rrf`)로 교체하면 된다.
+
 ## 다음 단계
 
-- 검색(Query Coordinator): `hybrid` 쿼리(match + knn) + `search_pipeline=hybrid-pipeline`로
-  실제 검색 엔드포인트 구현.
+- 결과 캐시를 인메모리 LRU → Redis로 확장(다중 코디네이터 인스턴스 공유).
+- 색인 워커를 Kafka(`media.created`/`media.enriched`) 소비자로 상시 구동(현재는 manifest 드라이버).

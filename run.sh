@@ -4,7 +4,8 @@
 # OpenSearch container) — run from inside the VPC, e.g. on EC2.
 #
 # Usage:
-#   ./run.sh up                 # build + start the API
+#   ./run.sh up                 # build + start the API (8000) + Streamlit FE (8501)
+#   ./run.sh smoke              # safe dry-run: index a few records into a throwaway index, then clean up
 #   ./run.sh index [--recreate] # index the manifest into OpenSearch
 #   ./run.sh search "<query>"   # run a hybrid search via the API
 #   ./run.sh logs               # tail the app logs
@@ -13,21 +14,52 @@
 set -eu
 
 API_URL="${API_URL:-http://localhost:8000}"
+FE_URL="${FE_URL:-http://localhost:8501}"
+# smoke knobs: throwaway index name + how many manifest records to test with.
+SMOKE_INDEX="${SMOKE_INDEX:-images_smoke}"
+SMOKE_N="${SMOKE_N:-20}"
 
 usage() {
-  sed -n '2,12p' "$0"
+  sed -n '2,13p' "$0"
   exit "${1:-0}"
 }
 
 up() {
   docker compose up -d --build
   echo "API up: ${API_URL}  (docs: ${API_URL}/docs)"
+  echo "FE  up: ${FE_URL}"
 }
 
 index() {
   # Pass extra args through, e.g. --recreate. One-off container, removed after.
   docker compose run --rm app \
     uv run --no-dev python -m hybridsearch.index.run_from_manifest "$@"
+}
+
+smoke() {
+  # End-to-end dry-run BEFORE the real `index`. Exercises the full path —
+  # manifest -> S3 sidecars -> embedding -> OpenSearch — on a small manifest
+  # slice and a throwaway index, then deletes that index. Never touches the real
+  # index (HS_INDEX_NAME, default 'images'), and is idempotent: re-run anytime.
+  [ -f data/manifest.jsonl ] || {
+    echo "error: data/manifest.jsonl not found — run prepare_dataset or copy it to this host" >&2
+    exit 2
+  }
+  # Clean up the temp slice no matter how we exit (failed smoke leaves nothing behind).
+  trap 'rm -f data/manifest.smoke.jsonl' EXIT
+  head -n "$SMOKE_N" data/manifest.jsonl > data/manifest.smoke.jsonl
+
+  echo ">> smoke: indexing first ${SMOKE_N} record(s) into '${SMOKE_INDEX}' (real index untouched)"
+  docker compose run --rm \
+    -e HS_INDEX_NAME="$SMOKE_INDEX" \
+    -e HS_MANIFEST_PATH=/app/data/manifest.smoke.jsonl \
+    app uv run --no-dev python -m hybridsearch.index.run_from_manifest --recreate
+
+  echo ">> smoke: verifying doc count, then deleting '${SMOKE_INDEX}'"
+  docker compose run --rm -e HS_INDEX_NAME="$SMOKE_INDEX" app \
+    uv run --no-dev python -c "from hybridsearch import config; from hybridsearch.search.client import get_client; c=get_client(); print('smoke doc count =', c.count(index=config.INDEX_NAME)['count']); c.indices.delete(index=config.INDEX_NAME); print('deleted index', config.INDEX_NAME)"
+
+  echo ">> smoke OK — manifest, S3 sidecars, embedding, and OpenSearch all reachable."
 }
 
 search() {
@@ -50,6 +82,7 @@ cmd="${1:-}"
 
 case "$cmd" in
   up)     up ;;
+  smoke)  smoke ;;
   index)  index "$@" ;;
   search) search "$@" ;;
   logs)   logs ;;

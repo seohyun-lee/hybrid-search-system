@@ -18,5 +18,31 @@ services:
       # Persist the downloaded embedding model across restarts.
       - hf-cache:/app/.cache/huggingface
 
+  # Streamlit FE (8501). Same image as `app`; just a different command.
+  # Calls the coordinator over the compose network (http://app:8000).
+  fe:
+    build: .
+    container_name: hybridsearch-fe
+    depends_on:
+      - app
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      # On EC2 (both as host processes) this would be localhost; in compose the
+      # API is reachable by its service name.
+      - HS_API_URL=http://app:8000
+    ports:
+      - "8501:8501"
+    command:
+      - uv
+      - run
+      - --no-dev
+      - streamlit
+      - run
+      - streamlit_app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+
 volumes:
   hf-cache:

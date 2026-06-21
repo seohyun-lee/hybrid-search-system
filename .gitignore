@@ -19,3 +19,4 @@ wheels/
 .idea/
 .DS_Store
 .claude/
+hybrid-search-system-terraform/

@@ -14,4 +14,6 @@ dependencies = [
     "python-dotenv>=1.0",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
+    "streamlit>=1.40",
+    "kafka-python>=2.0",
 ]
