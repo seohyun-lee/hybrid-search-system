@@ -40,11 +40,18 @@ DATASET_SPLIT = os.getenv("HS_DATASET_SPLIT", "test")  # flickr30k ships all row
 DEFAULT_LIMIT = int(os.getenv("HS_DEFAULT_LIMIT", "10000"))
 
 # OpenSearch
+# Auth mode decides how get_client() connects:
+#   local -> dockerized OpenSearch, security off, http (dev default)
+#   basic -> https + username/password (FGAC master user / secured self-hosted)
+#   iam   -> https + AWS SigV4 request signing (AWS Managed OpenSearch; no password)
+OPENSEARCH_AUTH = os.getenv("OPENSEARCH_AUTH", "local").lower()
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
 OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "admin")
 OPENSEARCH_USE_SSL = os.getenv("OPENSEARCH_USE_SSL", "false").lower() == "true"
+# Managed-domain SigV4 service name: "es" for a provisioned domain, "aoss" for Serverless.
+OPENSEARCH_AWS_SERVICE = os.getenv("OPENSEARCH_AWS_SERVICE", "es")
 INDEX_NAME = os.getenv("HS_INDEX_NAME", "images")
 SEARCH_PIPELINE = os.getenv("HS_SEARCH_PIPELINE", "hybrid-pipeline")
 
