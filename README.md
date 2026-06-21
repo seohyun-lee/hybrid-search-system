@@ -7,21 +7,40 @@ S3 없이 같은 파이프라인을 돌려보기 위한 대체물이다.
 
 ## 아키텍처 / 데이터 흐름
 
-```
-flickr30k (HF, streaming)
-      │
-      ▼
-[ Stage 0 ] prepare_dataset      이미지 + 메타데이터 사이드카 저장 → 스토리지
-      │                          레코드 1줄씩 기록            → data/manifest.jsonl
-      ▼
-data/manifest.jsonl  (canonical source / 이벤트 피드)
-      │
-      ▼
-[ Stage 1 ] run_from_manifest    각 레코드를 2단계로 색인:
-      │                            index_basic      → 이미지 URL + 기본 메타 (1차 이벤트)
-      │                            index_enrichment → 캡션(BM25) + 임베딩(kNN) (2차 이벤트)
-      ▼
-OpenSearch index `images`  +  hybrid search pipeline
+```mermaid
+flowchart TB
+    HF["flickr30k<br/>(HF, streaming)"]
+
+    subgraph S0["Stage 0 · prepare_dataset"]
+        direction TB
+        P["이미지 + 메타 사이드카 저장<br/>레코드 1줄씩 기록"]
+    end
+
+    ST[("Object Storage<br/>S3 / local<br/>(이미지 + meta 사이드카)")]
+    MF[/"data/manifest.jsonl<br/>canonical source · 이벤트 피드"/]
+
+    subgraph S1["Stage 1 · run_from_manifest (2단계 색인 worker)"]
+        direction TB
+        IB["index_basic<br/>이미지 URL + 기본 메타<br/>(1차 이벤트)"]
+        IE["index_enrichment<br/>캡션(BM25) + 임베딩(kNN)<br/>(2차 이벤트)"]
+    end
+
+    OS[("OpenSearch index images<br/>+ hybrid search pipeline")]
+    FE["Streamlit FE :8501"]
+    QC["Query Coordinator<br/>FastAPI :8000<br/>정규화 → 캐시 → 임베딩 → hybrid"]
+    U(("사용자"))
+
+    HF --> S0
+    P --> ST
+    P --> MF
+    MF --> S1
+    IB -->|"doc_as_upsert (멱등)"| OS
+    IE -->|"doc_as_upsert (멱등)"| OS
+    ST -.재색인 시 임베딩 재사용.-> S1
+
+    U --> FE -->|/search| QC
+    QC -->|"match on description<br/>+ knn on caption_vector"| OS
+    OS -->|hits| QC --> FE
 ```
 
 - **스토리지가 source of truth.** 이미지 옆에 메타데이터 JSON(사이드카)을 같이 저장하고,
@@ -50,6 +69,9 @@ main.py                      Query Coordinator (FastAPI): 정규화→캐시→�
 streamlit_app.py             Streamlit FE (8501): 검색창 + 결과 그리드, 코디네이터 /search만 호출
 docker-compose.yml           app(FastAPI 8000) + fe(Streamlit 8501) — .env 로 Managed OpenSearch + S3 연결
 ```
+
+> 개발용 AWS 인프라(Terraform)는 별도 레포에 있다 →
+> [aerim-choi/hybrid-search-system-terraform](https://github.com/aerim-choi/hybrid-search-system-terraform). 아래 "개발용 인프라" 참고.
 
 ## 사전 준비
 
@@ -268,6 +290,95 @@ OPENSEARCH_USE_SSL=true
 > RRF는 "튜닝 없이도 무난하게 동작하는" 견고함이 장점이라 가중치 조정이 불필요한 경우 좋은 선택이다.
 > 전환하려면 도메인 엔진 버전(2.19+) 확인 후 `hybridsearch/search/index.py`의 `SEARCH_PIPELINE_BODY`를
 > `score-ranker-processor`(technique `rrf`)로 교체하면 된다.
+
+## 개발용 인프라 (별도 레포)
+
+데모/개발 환경을 한 번에 띄우기 위한 **AWS 인프라(Terraform)** 는 별도 레포로 관리한다 →
+**[aerim-choi/hybrid-search-system-terraform](https://github.com/aerim-choi/hybrid-search-system-terraform)**.
+이 앱 레포와 분리돼 있으며, 위 앱이 붙는 OpenSearch·S3·(예정)Kafka를 VPC 안에 프로비저닝한다.
+자세한 배포 절차는 해당 레포의 `infra/terraform/README.md` 참고.
+
+```mermaid
+flowchart LR
+    U(("사용자")) -->|"8501 / 8000<br/>(allowed_cidrs)"| EC2
+
+    subgraph VPC["VPC 10.0.0.0/16"]
+        subgraph PUB["public subnet"]
+            EC2["EC2 t3.large + EIP<br/>Streamlit FE + FastAPI BE + Worker"]
+        end
+        subgraph PRIV["private subnet"]
+            OS[("OpenSearch<br/>t3.small.search · BM25+kNN")]
+            MSK[("MSK Kafka<br/>kafka.t3.small × 2")]
+            RDS[("RDS PostgreSQL<br/>선택 · enable_rds")]
+        end
+    end
+
+    EC2 -->|"HTTPS 443"| OS
+    EC2 <-->|"9092 plaintext (VPC 내부)"| MSK
+    EC2 -.->|"enable_rds=true"| RDS
+    EC2 -->|"presigned URL"| S3[("S3 media bucket")]
+```
+
+| 리소스 | 용도 | 사양(기본) |
+|---|---|---|
+| VPC + 서브넷 | public 2 / private 2, IGW (NAT 없음) | `10.0.0.0/16` |
+| EC2 + EIP | FE(Streamlit) + BE(FastAPI) + Worker | `t3.large`, AL2023 |
+| OpenSearch | BM25 + kNN 하이브리드 색인 (VPC 전용) | `t3.small.search` × 1, `OpenSearch_2.13` |
+| MSK | 색인 트리거용 이벤트 스트리밍 (Kafka) | `kafka.t3.small` × 2, plaintext |
+| S3 | 이미지 적재 + presigned URL | private |
+| RDS PostgreSQL | (선택) pgvector | `db.t3.micro`, `enable_rds=true` |
+| IAM | EC2 인스턴스 롤 (S3, SSM) | — |
+
+```bash
+git clone https://github.com/aerim-choi/hybrid-search-system-terraform.git
+cd hybrid-search-system-terraform/infra/terraform
+cp terraform.tfvars.example terraform.tfvars   # allowed_cidrs 등 수정 (본인 IP/32 권장)
+terraform init && terraform apply
+terraform output                                # streamlit_url / opensearch_endpoint / s3_media_bucket ...
+# SSH 키 없이 접속: terraform output -raw ssm_connect 명령 사용
+```
+
+> ⚠️ **MSK + OpenSearch는 시간당 과금**된다. 데모 종료 후 반드시 `terraform destroy`.
+> `terraform output`의 엔드포인트를 EC2의 `.env`(앱 설정)에 채워 위 앱을 기동한다 —
+> OpenSearch는 VPC 전용이라 **EC2(VPC 안)에서 실행**해야 닿는다.
+
+## 규모 및 확장 (Scale)
+
+현재 구성은 **데모/개발 규모**에 맞춰져 있다 — 단일 EC2(`t3.large`)에 FE+BE+Worker가 함께 뜨고,
+OpenSearch는 단일 노드(`t3.small.search`), 캐시는 코디네이터 프로세스 안의 인메모리 LRU다.
+
+| 항목 | 현재 감당 규모 | 한계/병목 | 확장 방법 |
+|---|---|---|---|
+| 문서 수 | 기본 1만 (flickr30k 상한 ~3.2만) | 단일 OpenSearch 노드 RAM (kNN HNSW 그래프는 메모리 상주) | 데이터 노드 추가 + 샤드/레플리카, 인스턴스 상향, 전용 마스터 |
+| 색인 처리량 | manifest 순차 색인 (CPU MiniLM 임베딩이 가장 느림) | 단일 워커·CPU 임베딩 | 워커를 **Kafka 소비자 그룹**으로 다중화(파티션 수만큼 수평 확장), 배치/GPU 임베딩, 사이드카 벡터 재사용으로 재임베딩 회피 |
+| 검색 QPS | 단일 코디네이터 + warm 모델 + 2단 LRU 캐시로 반복 질의는 즉시 응답 | 캐시가 프로세스 로컬이라 인스턴스 간 공유 안 됨 | 코디네이터 다중화 + **ALB/오토스케일**, 결과 캐시를 **Redis**로 이전(공유) |
+| 가용성(HA) | 단일 노드·단일 인스턴스 (SPOF) | 노드 장애 시 전면 중단 | OpenSearch 멀티-AZ + 레플리카, BE 다중 인스턴스, MSK 다중 브로커 |
+
+확장 시 코드 변경 없이 대응되는 지점:
+- **임베딩 일관성**은 모델/정규화가 `hybridsearch/embedding.py` 한 곳에 모여 있어, 색인·검색을 따로
+  스케일아웃해도 벡터 공간이 어긋나지 않는다.
+- **재색인 비용 최소화**: 스토리지가 source of truth라 인덱스를 날리고 노드를 늘려도 manifest + S3
+  사이드카로 **재임베딩 없이** 복구·재색인된다.
+- **융합 가중치**는 요청별 인라인 파이프라인으로 처리돼, 명명 파이프라인을 바꾸지 않고 튜닝 가능.
+
+## 검증 / 테스트
+
+- **엔드투엔드 스모크 (`./run.sh smoke`)** — 본 색인 전 권장 드라이런. 전체 경로
+  (manifest → S3 사이드카 → 임베딩 → OpenSearch)를 버려도 되는 인덱스(`images_smoke`)에 앞
+  `SMOKE_N`(기본 20)건만 색인→문서수 검증→삭제한다. 컨테이너 IMDS 자격증명(S3)과 OpenSearch
+  연결을 한 번에 확인하며, **실제 `images` 인덱스는 건드리지 않고** 재실행해도 안전(멱등)하다.
+- **멱등·순서무관 보장** — `index_basic`/`index_enrichment`가 `doc_as_upsert`로 서로 겹치지 않는
+  필드만 쓰므로, 어느 이벤트가 먼저 오든·중복 재전송돼도 결과가 같다(2단계 색인의 설계 불변식).
+- **워커 가드 유닛테스트 (11 cases)** — Kafka 이벤트 구동 색인 작업분기
+  (`feature/kafka-event-indexing` 브랜치, `tests/test_worker_guard.py`)에 있다. 라이브 클러스터 없이
+  `FakeClient`로 OpenSearch painless 가드 스크립트를 미러링해 **순서대로/역순/중복·stale 재전송**
+  시나리오에서 phase별 stale-overwrite 방지와 필드 분리를 검증한다.
+  ```bash
+  uv run pytest tests/test_worker_guard.py -q   # 해당 브랜치에서
+  ```
+
+> 메인 브랜치의 상시 검증 수단은 `run.sh smoke`이며, 이벤트 구동(Kafka) 경로와 그 유닛테스트는
+> 위 작업분기에서 통합 예정이다.
 
 ## 다음 단계
 

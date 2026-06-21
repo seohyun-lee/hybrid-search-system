@@ -1,0 +1,4 @@
+# Streamlit theme. primaryColor is the accent ("point") color used by widgets,
+# spinner, sliders, focus rings, etc. Default is red (#FF4B4B) — switched to green.
+[theme]
+primaryColor = "#1ba883"

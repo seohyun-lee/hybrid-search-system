@@ -21,6 +21,8 @@ RUN uv sync --frozen --no-install-project --no-dev
 # (the `fe` compose service overrides the command).
 COPY main.py streamlit_app.py ./
 COPY hybridsearch ./hybridsearch
+# Streamlit theme (green accent) for the FE service.
+COPY .streamlit ./.streamlit
 
 # Connection (OpenSearch host, S3 bucket, ...) is provided at runtime via .env
 # (docker-compose env_file). No connection defaults are baked into the image.

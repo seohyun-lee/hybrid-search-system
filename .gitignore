@@ -20,3 +20,7 @@ wheels/
 .DS_Store
 .claude/
 hybrid-search-system-terraform/
+/.run/fe-api.pid
+/logs/fe-api.log
+/logs/fe-streamlit.log
+/.run/fe-streamlit.pid

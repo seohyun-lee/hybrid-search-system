@@ -9,7 +9,9 @@ Run:
 """
 from __future__ import annotations
 
+import html
 import os
+import re
 
 import requests
 import streamlit as st
@@ -37,6 +39,28 @@ query = st.text_input(
 )
 
 
+def _highlight(text: str, q: str) -> str:
+    """Bold each query term where it appears in `text` (case-insensitive)."""
+    tokens = [re.escape(t) for t in q.split() if t]
+    if not text or not tokens:
+        return text
+    return re.sub(r"(" + "|".join(tokens) + r")", r"**\1**", text, flags=re.IGNORECASE)
+
+
+def _image_card(desc: str) -> str:
+    """A clean placeholder tile that reads as 'an image lives here' without
+    surfacing a broken-image icon (the real images can't be served right now)."""
+    return (
+        f'<div title="{html.escape(desc, quote=True)}" '
+        'style="aspect-ratio:4/3;border-radius:10px;'
+        "background:linear-gradient(135deg,#e8f3ec,#d3e7da);"
+        "display:flex;align-items:center;justify-content:center;"
+        'border:1px solid #cfe3d6;">'
+        '<span style="font-size:2.4rem;opacity:.5;">🖼️</span>'
+        "</div>"
+    )
+
+
 def _search(q: str) -> dict:
     params: dict = {"q": q, "size": size}
     if w_bm25 is not None:
@@ -56,18 +80,17 @@ if query:
             st.stop()
 
     results = data.get("results", [])
-    st.caption(f"'{data.get('query', query)}' — {len(results)}건")
+    echoed = data.get("query", query)
+    st.caption(f"**{echoed}** — {len(results)}건")
     if not results:
         st.info("결과가 없습니다.")
 
     cols = st.columns(n_cols)
     for i, hit in enumerate(results):
         with cols[i % n_cols]:
-            url = hit.get("image_url")
-            if url:
-                st.image(url, use_container_width=True)
-            else:
-                st.write("(이미지 URL 없음)")
             desc = hit.get("description") or ""
-            st.caption(desc)
+            # Images can't be served right now — show an intentional placeholder
+            # tile instead of a broken <img>, so the grid still reads as images.
+            st.markdown(_image_card(desc), unsafe_allow_html=True)
+            st.caption(_highlight(desc, echoed))
             st.write(f"**score** {hit.get('score', 0.0):.4f}")
