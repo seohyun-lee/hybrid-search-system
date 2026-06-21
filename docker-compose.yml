@@ -44,5 +44,26 @@ services:
       - --server.port=8501
       - --server.address=0.0.0.0
 
+  # Kafka consumer worker: image-events -> OpenSearch. Same image as `app`.
+  # No container_name + no ports, so it scales: `docker compose up -d --scale
+  # worker=2` (up to the topic's partition count). Needs the model cache for the
+  # ImageEnriched embedding step.
+  worker:
+    build: .
+    env_file:
+      - path: .env
+        required: true
+    volumes:
+      - ./data:/app/data
+      - hf-cache:/app/.cache/huggingface
+    command:
+      - uv
+      - run
+      - --no-dev
+      - python
+      - -m
+      - hybridsearch.events.consumer
+    restart: unless-stopped
+
 volumes:
   hf-cache:

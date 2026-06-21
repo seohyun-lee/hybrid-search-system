@@ -55,6 +55,17 @@ OPENSEARCH_AWS_SERVICE = os.getenv("OPENSEARCH_AWS_SERVICE", "es")
 INDEX_NAME = os.getenv("HS_INDEX_NAME", "images")
 SEARCH_PIPELINE = os.getenv("HS_SEARCH_PIPELINE", "hybrid-pipeline")
 
+# Kafka / MSK (event-driven indexing)
+# MSK is unauthenticated + TLS_PLAINTEXT -> PLAINTEXT on :9092, VPC SG-restricted.
+# Single topic, key=image_id (per-image ordering); a separate DLQ for poison msgs.
+KAFKA_BOOTSTRAP = os.getenv("HS_KAFKA_BOOTSTRAP", "")  # comma-separated host:9092
+KAFKA_SECURITY_PROTOCOL = os.getenv("HS_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+KAFKA_TOPIC = os.getenv("HS_KAFKA_TOPIC", "image-events")
+KAFKA_DLQ_TOPIC = os.getenv("HS_KAFKA_DLQ_TOPIC", "image-events.dlq")
+KAFKA_CONSUMER_GROUP = os.getenv("HS_KAFKA_CONSUMER_GROUP", "image-indexer")
+KAFKA_TOPIC_PARTITIONS = int(os.getenv("HS_KAFKA_TOPIC_PARTITIONS", "2"))  # = broker count
+KAFKA_MAX_RETRIES = int(os.getenv("HS_KAFKA_MAX_RETRIES", "5"))  # transient retries before DLQ
+
 # Embedding
 EMBEDDING_MODEL = os.getenv("HS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM = int(os.getenv("HS_EMBEDDING_DIM", "384"))
