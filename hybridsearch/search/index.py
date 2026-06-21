@@ -65,11 +65,11 @@ SEARCH_PIPELINE_BODY = {
 
 
 def create_index(client: OpenSearch, recreate: bool = False) -> None:
-    if client.indices.exists(config.INDEX_NAME):
+    if client.indices.exists(index=config.INDEX_NAME):
         if not recreate:
             return
-        client.indices.delete(config.INDEX_NAME)
-    client.indices.create(config.INDEX_NAME, body=INDEX_BODY)
+        client.indices.delete(index=config.INDEX_NAME)
+    client.indices.create(index=config.INDEX_NAME, body=INDEX_BODY)
 
 
 def create_search_pipeline(client: OpenSearch) -> None:
