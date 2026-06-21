@@ -116,6 +116,34 @@ python -m http.server 8000 -d ./data/images   # image_url = http://localhost:800
 > `HS_S3_BUCKET`이 올바른 버킷을 가리키는지 먼저 확인할 것. 빠르게 동작만 확인할 때는
 > S3를 건드리지 않도록 `HS_STORAGE_BACKEND=local`을 명시하는 게 안전하다.
 
+## OpenSearch 연결 (`OPENSEARCH_AUTH`)
+
+`get_client()`가 `OPENSEARCH_AUTH` 값에 따라 접속/인증 방식을 고른다. 색인·검색 코드는
+그대로고 **이 설정만 바꾸면 로컬 도커 ↔ AWS Managed OpenSearch로 전환**된다.
+
+| 모드 | 용도 | 연결 | 인증 |
+|------|------|------|------|
+| `basic` | **AWS Managed (운영)** | HTTPS:443 | 마스터 유저 ID/PW (FGAC) |
+| `iam` | AWS Managed (대안) | HTTPS:443 | AWS SigV4 서명 (비번 없음, EC2 롤 등) |
+| `local` (기본) | 로컬 도커 (개발) | http:9200 | 보안 비활성 |
+
+### AWS Managed 연결 (basic) — `.env`
+
+```dotenv
+OPENSEARCH_AUTH=basic
+OPENSEARCH_HOST=search-xxxxx.ap-northeast-2.es.amazonaws.com   # https:// 빼고 호스트만
+OPENSEARCH_PORT=443                                            # ⚠️ 필수: 기본값 9200 아님
+OPENSEARCH_USER=<master-user>
+OPENSEARCH_PASSWORD=<master-password>
+```
+
+> `basic`/`iam` 모두 HTTPS라 **포트를 443으로 둬야 한다**(기본값 9200은 로컬 도커용).
+> 자격증명은 코드에 두지 말고 `.env`(git 미추적) 또는 시크릿으로 주입할 것.
+>
+> `iam` 방식은 비밀번호 없이 SigV4로 서명한다. 대신 EC2 인스턴스 롤에 `es:ESHttp*` 권한 +
+> 도메인 액세스 정책이 필요하고, `.env`는 `OPENSEARCH_AUTH=iam` + `OPENSEARCH_HOST` +
+> `AWS_REGION`만 있으면 된다(Serverless는 `OPENSEARCH_AWS_SERVICE=aoss`).
+
 ## 설정 (환경변수)
 
 `hybridsearch/config.py`의 모든 값은 환경변수로 덮어쓸 수 있고, 루트 `.env`가 있으면 자동
@@ -135,9 +163,11 @@ python -m http.server 8000 -d ./data/images   # image_url = http://localhost:800
 | `HS_DATASET_NAME` | `lmms-lab/flickr30k` | HF 데이터셋 (parquet 미러) |
 | `HS_DATASET_SPLIT` | `test` | flickr30k는 전체가 `test`에 있음 |
 | `HS_DEFAULT_LIMIT` | `10000` | `--limit` 기본값 |
-| `OPENSEARCH_HOST` / `OPENSEARCH_PORT` | `localhost` / `9200` | OpenSearch 접속 |
-| `OPENSEARCH_USER` / `OPENSEARCH_PASSWORD` | `admin` / `admin` | 인증 (보안 활성 시) |
-| `OPENSEARCH_USE_SSL` | `false` | SSL 사용 여부 |
+| `OPENSEARCH_AUTH` | `local` | 접속/인증 방식: `local` / `basic` / `iam` (위 "OpenSearch 연결" 참고) |
+| `OPENSEARCH_HOST` / `OPENSEARCH_PORT` | `localhost` / `9200` | OpenSearch 접속 (AWS Managed는 도메인 + `443`) |
+| `OPENSEARCH_USER` / `OPENSEARCH_PASSWORD` | `admin` / `admin` | `basic` 모드 인증 (FGAC 마스터 유저) |
+| `OPENSEARCH_USE_SSL` | `false` | `local` 모드의 SSL 여부 (`basic`/`iam`은 항상 HTTPS) |
+| `OPENSEARCH_AWS_SERVICE` | `es` | `iam` 모드 SigV4 서비스명 (Serverless는 `aoss`) |
 | `HS_INDEX_NAME` | `images` | 인덱스 이름 |
 | `HS_SEARCH_PIPELINE` | `hybrid-pipeline` | 하이브리드 search pipeline 이름 |
 | `HS_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | 임베딩 모델 |
@@ -145,14 +175,22 @@ python -m http.server 8000 -d ./data/images   # image_url = http://localhost:800
 
 ### `.env` 예시
 
-```dotenv
-# 로컬 개발 (기본)
-HS_STORAGE_BACKEND=local
+전체 항목은 [`.env.example`](.env.example) 참고. 자주 쓰는 조합:
 
-# S3 사용 시
+```dotenv
+# 로컬 개발 (기본): 로컬 도커 OpenSearch + 로컬 디렉터리 스토리지
+HS_STORAGE_BACKEND=local
+OPENSEARCH_AUTH=local
+
+# 운영: S3 적재 + AWS Managed OpenSearch (basic)
 # HS_STORAGE_BACKEND=s3
 # HS_S3_BUCKET=your-bucket
 # AWS_REGION=ap-northeast-2
+# OPENSEARCH_AUTH=basic
+# OPENSEARCH_HOST=search-xxxxx.ap-northeast-2.es.amazonaws.com
+# OPENSEARCH_PORT=443
+# OPENSEARCH_USER=<master-user>
+# OPENSEARCH_PASSWORD=<master-password>
 ```
 
 ## 메모

@@ -1,0 +1,1 @@
+환경변수 관련 작업 후에 .env.example, README.md 갱신할 것.
