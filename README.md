@@ -96,6 +96,18 @@ uv run python -m hybridsearch.index.run_from_manifest
 - 사이드카에 `caption_vector`가 이미 있으면 **재임베딩 없이 재사용**한다(모델 재실행 불필요).
 - 인덱스 매핑/파이프라인만 따로 만들고 싶으면:
   `uv run python -m hybridsearch.search.index --recreate`
+- **색인은 멱등하다.** `image_id` 기준 upsert(`doc_as_upsert`)라 재실행해도 중복이 안 생기고,
+  `--recreate`로 인덱스를 날려도 manifest + S3 사이드카로 똑같이 복구된다. 실수해도 다시 돌리면 됨.
+
+> **본 색인 전 드라이런 (권장):** EC2(VPC 안)에서 도커로 돌릴 때는 `./run.sh smoke`로 전체
+> 경로(manifest → S3 사이드카 → 임베딩 → OpenSearch)를 소량으로 먼저 검증한다. 버려도 되는
+> 인덱스(`images_smoke`)에 앞 `SMOKE_N`(기본 20)건만 색인했다가 지우므로 **실제 `images`
+> 인덱스는 건드리지 않는다.** 컨테이너 안 IMDS 자격증명(S3)과 OpenSearch 연결을 한 번에 확인하는 용도.
+>
+> ```bash
+> ./run.sh up && ./run.sh smoke      # 통과하면:
+> ./run.sh index --recreate
+> ```
 
 ### 4) 이미지 확인용 정적 서버 (local 백엔드일 때)
 
