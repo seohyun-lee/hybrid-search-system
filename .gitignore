@@ -18,3 +18,4 @@ wheels/
 .dockerignore
 .idea/
 .DS_Store
+.claude/
