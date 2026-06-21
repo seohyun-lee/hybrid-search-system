@@ -23,7 +23,7 @@ flowchart LR
   ST[("Object Storage · S3/local<br/>이미지 + meta 사이드카")]:::data
   MF[/"manifest.jsonl<br/>canonical · 이벤트 피드"/]:::data
 
-  PUB["producer · publish_from_manifest<br/>레코드 → 2개 이벤트 (key=image_id)"]:::sehyun
+  PUB["producer · publish_from_manifest<br/>레코드 → 2개 이벤트 (key=image_id)<br/>현재 유일 producer · 실서비스 발행은 예정"]:::sehyun
 
   subgraph KAFKA["Kafka · MSK"]
     direction TB
@@ -75,7 +75,43 @@ flowchart LR
   (`ts_basic`/`ts_enriched` = 이벤트 `occurred_at`)만 쓴다. 순서가 뒤바뀌어도 손실이 없고,
   같은 phase의 오래된 재전달(`ts < 저장값`)은 `ctx.op='noop'`으로 버린다 (`index/worker.py`).
 - **Kafka 없이 직접 색인**도 가능: `run_from_manifest`가 같은 두 함수를 순차 호출한다(개발/백필용).
+- **`manifest.jsonl`은 "지금까지 준비된 이미지 전체 목록"이다 (이미지 1장 = JSONL 한 줄).** 실제 한 줄:
+  ```json
+  {"image_id":"1000092795","image_url":".../1000092795.jpg","width":333,"height":500,
+   "source":"lmms-lab/flickr30k","description":"Two young guys ...","captions":["...", "..."]}
+  ```
+  진짜 운영 서비스라면 사용자가 이미지를 올릴 때 업로드/캡셔닝 서비스가 `ImageCreated`/`ImageEnriched`를
+  **직접** Kafka에 쏜다. 하지만 이 프로젝트는 flickr30k로 만든 데모라 그런 서비스가 없어서,
+  `publish_from_manifest`가 **manifest를 한 줄씩 읽어 "방금 올라온 이미지인 척" 이벤트를 발행**한다
+  (한 줄 → `ImageCreated`: image_id/url/width/height/source + `ImageEnriched`: description=BM25, captions→임베딩=kNN).
+  **그래서 manifest가 Kafka로 들어갈 이벤트의 유일한 출처**다. manifest가 없으면:
+  - `publish_from_manifest`가 읽을 게 없어 **발행 이벤트 0건** → 워커도 색인할 게 없다.
+  - `prepare_dataset`이 "이 image_id 이미 받았나"를 manifest로 판단하는데, 없으면 다 안 받은 줄 알고
+    **flickr30k 3.2만 장을 처음부터 재다운로드**한다.
+  - 인덱스를 `--recreate`로 날리거나 토픽을 다시 만든 뒤 **다시 채워 넣을 원본 목록**이 manifest인데, 없으면 못 채운다.
+  - Kafka를 안 쓰는 `run_from_manifest` 직접 색인도 manifest를 입력으로 읽으므로 **실행 자체가 안 된다**.
 - `manifest`는 항상 로컬 파일(스토리지 백엔드와 무관). 이미지/사이드카만 백엔드로 나간다.
+
+### manifest 추가 설명 : manifest 한 줄 ≠ 이벤트 1개 (1차·2차 분리)
+
+manifest는 *이벤트 로그*가 아니라 **이미지 원본 목록**이다. 발행 시 한 줄이 **두 이벤트로 쪼개진다**:
+
+```
+manifest 한 줄
+├─ image_id · image_url · width · height · source  ─→ 1차 ImageCreated  (이미지가 "존재")
+└─ description · captions                            ─→ 2차 ImageEnriched (캡션 붙어 "검색 가능")
+```
+
+| | 1차 `ImageCreated` | 2차 `ImageEnriched` |
+|---|---|---|
+| 의미 | 이미지가 생겼다(존재) | 캡션이 붙어 검색 가능해졌다 |
+| 필드 | image_id · image_url · width · height · source | description(→BM25) · captions→임베딩(→kNN) |
+| 색인 후 | 이미지·메타는 결과에 뜨지만 검색엔 안 잡힘 | 비로소 키워드·의미 검색에 잡힘 |
+| 가드 | `ts_basic` | `ts_enriched` |
+
+둘로 나누는 이유: 실제론 **이미지 업로드(즉시)** 와 **AI 캡셔닝(나중)** 의 시점이 다르기 때문이다. flickr30k는
+캡션이 이미 있어 manifest 한 줄에 둘 다 들어있지만, "두 시점에 따로 도착하는" 흐름을 흉내 내려 일부러 쪼개
+발행한다 — 그래서 2차가 먼저 오거나·1차만 오거나·중복 재전송돼도 안전하도록 위의 `ts_basic`/`ts_enriched` 가드를 둔다.
 
 ## 프로젝트 구조
 
