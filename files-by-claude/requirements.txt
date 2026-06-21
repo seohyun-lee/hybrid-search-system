@@ -1,5 +1,0 @@
-datasets
-pillow
-sentence-transformers
-opensearch-py
-boto3

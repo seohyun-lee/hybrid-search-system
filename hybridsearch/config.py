@@ -4,6 +4,15 @@ from pathlib import Path
 
 # repo root = parent of this package
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+# Load a local .env if python-dotenv is available. Real env vars already set in
+# the shell win over the file (override=False), so prod/CI config is unaffected.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT_DIR / ".env", override=False)
+except ModuleNotFoundError:
+    pass
 DATA_DIR = Path(os.getenv("HS_DATA_DIR", ROOT_DIR / "data"))
 IMAGES_DIR = Path(os.getenv("HS_IMAGES_DIR", DATA_DIR / "images"))
 MANIFEST_PATH = Path(os.getenv("HS_MANIFEST_PATH", DATA_DIR / "manifest.jsonl"))
@@ -18,7 +27,11 @@ STORAGE_BASE_URL = os.getenv("HS_STORAGE_BASE_URL", "http://localhost:8000/image
 # S3 backend settings (used when HS_STORAGE_BACKEND=s3)
 S3_BUCKET = os.getenv("HS_S3_BUCKET", "")
 AWS_REGION = os.getenv("AWS_REGION", "ap-northeast-2")
-S3_PREFIX = os.getenv("HS_S3_PREFIX", "images")
+S3_IMAGE_PREFIX = os.getenv("HS_S3_IMAGE_PREFIX", "images")
+S3_META_PREFIX = os.getenv("HS_S3_META_PREFIX", "meta")
+# AWS region for the S3 client. Empty -> boto3 resolves it from the standard
+# chain (AWS_REGION / AWS_DEFAULT_REGION / ~/.aws/config).
+S3_REGION = os.getenv("HS_S3_REGION", "") or None
 
 # Dataset
 # parquet-based mirror — `nlphuji/flickr30k` is script-based and breaks on datasets>=4
