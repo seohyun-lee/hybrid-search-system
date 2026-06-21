@@ -11,3 +11,10 @@ wheels/
 
 # Generated data (images + manifest)
 /data/
+
+.env
+.env.local
+.env.prod
+.dockerignore
+.idea/
+.DS_Store
