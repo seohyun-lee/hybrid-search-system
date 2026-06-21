@@ -17,8 +17,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
-# App code.
-COPY main.py ./
+# App code. Same image serves both the API (default CMD) and the Streamlit FE
+# (the `fe` compose service overrides the command).
+COPY main.py streamlit_app.py ./
 COPY hybridsearch ./hybridsearch
 
 # Connection (OpenSearch host, S3 bucket, ...) is provided at runtime via .env

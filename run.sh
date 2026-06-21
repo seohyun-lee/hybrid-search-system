@@ -4,7 +4,7 @@
 # OpenSearch container) — run from inside the VPC, e.g. on EC2.
 #
 # Usage:
-#   ./run.sh up                 # build + start the API
+#   ./run.sh up                 # build + start the API (8000) + Streamlit FE (8501)
 #   ./run.sh smoke              # safe dry-run: index a few records into a throwaway index, then clean up
 #   ./run.sh index [--recreate] # index the manifest into OpenSearch
 #   ./run.sh search "<query>"   # run a hybrid search via the API
@@ -14,6 +14,7 @@
 set -eu
 
 API_URL="${API_URL:-http://localhost:8000}"
+FE_URL="${FE_URL:-http://localhost:8501}"
 # smoke knobs: throwaway index name + how many manifest records to test with.
 SMOKE_INDEX="${SMOKE_INDEX:-images_smoke}"
 SMOKE_N="${SMOKE_N:-20}"
@@ -26,6 +27,7 @@ usage() {
 up() {
   docker compose up -d --build
   echo "API up: ${API_URL}  (docs: ${API_URL}/docs)"
+  echo "FE  up: ${FE_URL}"
 }
 
 index() {

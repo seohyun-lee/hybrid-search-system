@@ -58,3 +58,16 @@ SEARCH_PIPELINE = os.getenv("HS_SEARCH_PIPELINE", "hybrid-pipeline")
 # Embedding
 EMBEDDING_MODEL = os.getenv("HS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM = int(os.getenv("HS_EMBEDDING_DIM", "384"))
+
+# Query Coordinator (FastAPI) + Streamlit FE
+# Base URL the FE uses to reach the coordinator. On EC2 both run on one host
+# (localhost); in docker-compose the FE overrides this to the API service name.
+API_URL = os.getenv("HS_API_URL", "http://localhost:8000")
+# In-memory LRU sizes: q -> embedding (skip re-encoding) and (q, k, weights) -> results.
+# 10K-doc corpus fits easily; swap for Redis when scaling out.
+EMBED_CACHE_SIZE = int(os.getenv("HS_EMBED_CACHE_SIZE", "1024"))
+QUERY_CACHE_SIZE = int(os.getenv("HS_QUERY_CACHE_SIZE", "1024"))
+# Default hybrid fusion weights [BM25, kNN] used when the request overrides the
+# named pipeline with inline weights. Must match SEARCH_PIPELINE_BODY in search/index.py.
+BM25_WEIGHT = float(os.getenv("HS_BM25_WEIGHT", "0.4"))
+KNN_WEIGHT = float(os.getenv("HS_KNN_WEIGHT", "0.6"))
