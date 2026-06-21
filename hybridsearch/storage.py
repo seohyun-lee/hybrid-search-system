@@ -107,11 +107,13 @@ class LocalStorage(ObjectStorage):
 
 
 class S3Storage(ObjectStorage):
-    """Uploads JPEGs to S3. Same interface as LocalStorage.
+    """Uploads images + metadata sidecars to S3. Same interface as LocalStorage.
 
     Auth: standard boto3 chain — EC2 instance role on the worker, or AWS_PROFILE
     locally. Bucket is private (BucketOwnerEnforced), so no ACL is set and the
     stored URL is the canonical object URL; serve images via `presigned_url()`.
+    Images live under HS_S3_IMAGE_PREFIX (`images/<id>.jpg`), metadata sidecars under
+    HS_S3_META_PREFIX (`meta/<id>.json`) so the two can be lifecycled separately.
     """
 
     def __init__(self, bucket: str, base_url: str = "", region: str | None = None):
@@ -123,7 +125,10 @@ class S3Storage(ObjectStorage):
 
         self.bucket = bucket
         self.region = region or os.getenv("AWS_REGION", "ap-northeast-2")
-        self.key_prefix = os.getenv("HS_S3_PREFIX", "images").strip("/")
+        self.key_prefix = os.getenv("HS_S3_IMAGE_PREFIX", "images").strip("/")
+        # Metadata sidecars live under their own prefix so the image blobs and the
+        # ML-derived JSON can be lifecycled / permissioned independently.
+        self.meta_prefix = os.getenv("HS_S3_META_PREFIX", "meta").strip("/")
         # The LocalStorage default base_url (localhost) is meaningless for S3, so
         # fall back to deriving the standard S3 object URL unless a real CDN/host
         # was provided.
@@ -133,16 +138,24 @@ class S3Storage(ObjectStorage):
             config=BotoConfig(retries={"max_attempts": 5}),
         )
 
-
     def _key(self, image_id: str) -> str:
         name = f"{image_id}.jpg"
         return f"{self.key_prefix}/{name}" if self.key_prefix else name
 
-    def url_for(self, image_id: str) -> str:
-        key = self._key(image_id)
+    def _meta_key(self, image_id: str) -> str:
+        name = f"{image_id}.json"
+        return f"{self.meta_prefix}/{name}" if self.meta_prefix else name
+
+    def _url_for_key(self, key: str) -> str:
         if self.base_url:
             return f"{self.base_url}/{key}"
         return f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{key}"
+
+    def url_for(self, image_id: str) -> str:
+        return self._url_for_key(self._key(image_id))
+
+    def metadata_url_for(self, image_id: str) -> str:
+        return self._url_for_key(self._meta_key(image_id))
 
     def exists(self, image_id: str) -> bool:
         from botocore.exceptions import ClientError
@@ -154,17 +167,6 @@ class S3Storage(ObjectStorage):
             if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
                 return False
             raise
-
-    def put_metadata(self, image_id: str, metadata: Dict[str, Any]) -> str:  # pragma: no cover
-        raise NotImplementedError(
-            "S3Storage not implemented yet. Set HS_STORAGE_BACKEND=local for now."
-        )
-
-    def get_metadata(self, image_id: str) -> Optional[Dict[str, Any]]:  # pragma: no cover
-        raise NotImplementedError
-
-    def exists(self, image_id: str) -> bool:  # pragma: no cover
-        raise NotImplementedError
 
     def put_image(self, image_id: str, image: Image.Image) -> str:
         if image.mode != "RGB":
@@ -179,6 +181,27 @@ class S3Storage(ObjectStorage):
         )
         return self.url_for(image_id)
 
+    def put_metadata(self, image_id: str, metadata: Dict[str, Any]) -> str:
+        body = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+        self._s3.put_object(
+            Bucket=self.bucket,
+            Key=self._meta_key(image_id),
+            Body=body,
+            ContentType="application/json",
+        )
+        return self.metadata_url_for(image_id)
+
+    def get_metadata(self, image_id: str) -> Optional[Dict[str, Any]]:
+        from botocore.exceptions import ClientError
+
+        try:
+            obj = self._s3.get_object(Bucket=self.bucket, Key=self._meta_key(image_id))
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
+        return json.loads(obj["Body"].read())
+
     def presigned_url(self, image_id: str, expires: int = 3600) -> str:
         """Time-limited GET URL for the private object (FE/BE use this to display)."""
         return self._s3.generate_presigned_url(
@@ -187,9 +210,6 @@ class S3Storage(ObjectStorage):
             ExpiresIn=expires,
         )
 
-    def metadata_url_for(self, image_id: str) -> str:  # pragma: no cover
-        return f"{self.base_url}/{image_id}.json"
-
 
 def get_storage() -> ObjectStorage:
     """Construct the storage backend selected by config."""
@@ -197,5 +217,5 @@ def get_storage() -> ObjectStorage:
     if backend == "local":
         return LocalStorage(config.IMAGES_DIR, config.STORAGE_BASE_URL)
     if backend == "s3":
-        return S3Storage(config.S3_BUCKET, config.STORAGE_BASE_URL)
+        return S3Storage(config.S3_BUCKET, config.STORAGE_BASE_URL, config.S3_REGION)
     raise ValueError(f"Unknown HS_STORAGE_BACKEND: {config.STORAGE_BACKEND!r}")

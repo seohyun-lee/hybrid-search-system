@@ -1,0 +1,35 @@
+# Hybrid search API image. Uses uv for fast, lockfile-pinned installs.
+FROM python:3.14-slim
+
+# uv: standalone binary, copied from the official distroless image.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    # Cache the (heavy) sentence-transformers model under the app dir.
+    HF_HOME=/app/.cache/huggingface
+
+WORKDIR /app
+
+# Install deps first, in their own layer, so code edits don't bust the cache.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+# App code.
+COPY main.py ./
+COPY hybridsearch ./hybridsearch
+
+# In-container defaults; override via env / docker-compose / .env.
+# OpenSearch runs in a sibling container, not localhost.
+ENV OPENSEARCH_HOST=opensearch \
+    OPENSEARCH_PORT=9200 \
+    OPENSEARCH_USE_SSL=false
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"
+
+CMD ["uv", "run", "--no-dev", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
