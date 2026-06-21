@@ -8,39 +8,44 @@ S3 없이 같은 파이프라인을 돌려보기 위한 대체물이다.
 ## 아키텍처 / 데이터 흐름
 
 ```mermaid
-flowchart TB
-    HF["flickr30k<br/>(HF, streaming)"]
+flowchart LR
+  classDef sehyun fill:#e8f3ee,stroke:#5aa886,color:#1f3d33;
+  classDef aerim  fill:#e6eefb,stroke:#5b8bd0,color:#1f3354;
+  classDef data   fill:#ece8e1,stroke:#b8b0a0,color:#3a352c;
 
-    subgraph S0["Stage 0 · prepare_dataset"]
-        direction TB
-        P["이미지 + 메타 사이드카 저장<br/>레코드 1줄씩 기록"]
-    end
+  HF["flickr30k<br/>HF · streaming"]:::data
+  U(("사용자")):::data
 
-    ST[("Object Storage<br/>S3 / local<br/>(이미지 + meta 사이드카)")]
-    MF[/"data/manifest.jsonl<br/>canonical source · 이벤트 피드"/]
+  subgraph S0["Stage 0 · prepare_dataset"]
+    P["이미지 + 메타 사이드카 저장<br/>레코드 1줄씩 기록"]:::sehyun
+  end
 
-    subgraph S1["Stage 1 · run_from_manifest (2단계 색인 worker)"]
-        direction TB
-        IB["index_basic<br/>이미지 URL + 기본 메타<br/>(1차 이벤트)"]
-        IE["index_enrichment<br/>캡션(BM25) + 임베딩(kNN)<br/>(2차 이벤트)"]
-    end
+  ST[("Object Storage · S3/local<br/>이미지 + meta 사이드카")]:::data
+  MF[/"manifest.jsonl<br/>canonical · 이벤트 피드"/]:::data
 
-    OS[("OpenSearch index images<br/>+ hybrid search pipeline")]
-    FE["Streamlit FE :8501"]
-    QC["Query Coordinator<br/>FastAPI :8000<br/>정규화 → 캐시 → 임베딩 → hybrid"]
-    U(("사용자"))
+  subgraph S1["Stage 1 · run_from_manifest · 2단계 색인"]
+    direction TB
+    IB["index_basic<br/>URL + 기본 메타 · 1차"]:::sehyun
+    IE["index_enrichment<br/>캡션(BM25) + 임베딩(kNN) · 2차"]:::sehyun
+  end
 
-    HF --> S0
-    P --> ST
-    P --> MF
-    MF --> S1
-    IB -->|"doc_as_upsert (멱등)"| OS
-    IE -->|"doc_as_upsert (멱등)"| OS
-    ST -.재색인 시 임베딩 재사용.-> S1
+  OS[("OpenSearch · images<br/>BM25 + kNN · hybrid pipeline")]:::sehyun
+  QC["Query Coordinator · FastAPI :8000<br/>정규화 → 캐시 → 임베딩 → hybrid"]:::aerim
+  FE["Streamlit FE :8501"]:::aerim
 
-    U --> FE -->|/search| QC
-    QC -->|"match on description<br/>+ knn on caption_vector"| OS
-    OS -->|hits| QC --> FE
+  %% --- write path ---
+  HF --> P
+  P --> ST
+  P --> MF
+  MF --> S1
+  ST -. 재색인 시 메타·이미지 재사용 .-> S1
+  IB -->|doc_as_upsert 멱등| OS
+  IE -->|doc_as_upsert 멱등| OS
+
+  %% --- read path ---
+  U --> FE -->|/search| QC
+  QC -->|match + knn| OS
+  OS -. hits .-> QC
 ```
 
 - **스토리지가 source of truth.** 이미지 옆에 메타데이터 JSON(사이드카)을 같이 저장하고,
