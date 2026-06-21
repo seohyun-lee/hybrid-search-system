@@ -8,7 +8,9 @@ ObjectStorage interface and the returned URL.
 from __future__ import annotations
 
 import abc
+import json
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from PIL import Image
 
@@ -16,11 +18,29 @@ from . import config
 
 
 class ObjectStorage(abc.ABC):
-    """Stores image bytes under a stable key (image_id) and returns its URL."""
+    """Stores image bytes + a metadata sidecar under a stable key (image_id).
+
+    The image is the blob; the sidecar JSON holds the ML-derived metadata
+    (captions, description, dimensions, source...). Persisting both makes the
+    object store the source of truth: if the search index is lost it can be
+    rebuilt from storage alone — no re-streaming the dataset and, crucially, no
+    re-running the (expensive) enrichment model.
+    """
 
     @abc.abstractmethod
     def put_image(self, image_id: str, image: Image.Image) -> str:
         """Persist `image` for `image_id` and return the URL to reach it."""
+
+    @abc.abstractmethod
+    def put_metadata(self, image_id: str, metadata: Dict[str, Any]) -> str:
+        """Persist the metadata sidecar for `image_id` and return its URL."""
+
+    @abc.abstractmethod
+    def get_metadata(self, image_id: str) -> Optional[Dict[str, Any]]:
+        """Read back the metadata sidecar for `image_id`, or None if absent.
+
+        Lets indexing rebuild from storage alone — if the sidecar already holds a
+        caption_vector, the (expensive) embedding model need not run again."""
 
     @abc.abstractmethod
     def exists(self, image_id: str) -> bool:
@@ -29,6 +49,10 @@ class ObjectStorage(abc.ABC):
     @abc.abstractmethod
     def url_for(self, image_id: str) -> str:
         """The URL an object for `image_id` would have, without storing it."""
+
+    @abc.abstractmethod
+    def metadata_url_for(self, image_id: str) -> str:
+        """The URL the metadata sidecar for `image_id` would have, without storing it."""
 
 
 class LocalStorage(ObjectStorage):
@@ -42,11 +66,20 @@ class LocalStorage(ObjectStorage):
     def _key(self, image_id: str) -> str:
         return f"{image_id}.jpg"
 
+    def _meta_key(self, image_id: str) -> str:
+        return f"{image_id}.json"
+
     def _path(self, image_id: str) -> Path:
         return self.images_dir / self._key(image_id)
 
+    def _meta_path(self, image_id: str) -> Path:
+        return self.images_dir / self._meta_key(image_id)
+
     def url_for(self, image_id: str) -> str:
         return f"{self.base_url}/{self._key(image_id)}"
+
+    def metadata_url_for(self, image_id: str) -> str:
+        return f"{self.base_url}/{self._meta_key(image_id)}"
 
     def exists(self, image_id: str) -> bool:
         return self._path(image_id).exists()
@@ -56,6 +89,18 @@ class LocalStorage(ObjectStorage):
             image = image.convert("RGB")
         image.save(self._path(image_id), format="JPEG", quality=90)
         return self.url_for(image_id)
+
+    def put_metadata(self, image_id: str, metadata: Dict[str, Any]) -> str:
+        with self._meta_path(image_id).open("w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        return self.metadata_url_for(image_id)
+
+    def get_metadata(self, image_id: str) -> Optional[Dict[str, Any]]:
+        path = self._meta_path(image_id)
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
 
 
 class S3Storage(ObjectStorage):
@@ -70,11 +115,22 @@ class S3Storage(ObjectStorage):
             "S3Storage not implemented yet. Set HS_STORAGE_BACKEND=local for now."
         )
 
+    def put_metadata(self, image_id: str, metadata: Dict[str, Any]) -> str:  # pragma: no cover
+        raise NotImplementedError(
+            "S3Storage not implemented yet. Set HS_STORAGE_BACKEND=local for now."
+        )
+
+    def get_metadata(self, image_id: str) -> Optional[Dict[str, Any]]:  # pragma: no cover
+        raise NotImplementedError
+
     def exists(self, image_id: str) -> bool:  # pragma: no cover
         raise NotImplementedError
 
     def url_for(self, image_id: str) -> str:  # pragma: no cover
         return f"{self.base_url}/{image_id}.jpg"
+
+    def metadata_url_for(self, image_id: str) -> str:  # pragma: no cover
+        return f"{self.base_url}/{image_id}.json"
 
 
 def get_storage() -> ObjectStorage:

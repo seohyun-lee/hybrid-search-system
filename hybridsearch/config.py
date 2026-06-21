@@ -20,3 +20,16 @@ S3_BUCKET = os.getenv("HS_S3_BUCKET", "")
 DATASET_NAME = os.getenv("HS_DATASET_NAME", "lmms-lab/flickr30k")
 DATASET_SPLIT = os.getenv("HS_DATASET_SPLIT", "test")  # flickr30k ships all rows in `test`
 DEFAULT_LIMIT = int(os.getenv("HS_DEFAULT_LIMIT", "10000"))
+
+# OpenSearch
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
+OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "admin")
+OPENSEARCH_USE_SSL = os.getenv("OPENSEARCH_USE_SSL", "false").lower() == "true"
+INDEX_NAME = os.getenv("HS_INDEX_NAME", "images")
+SEARCH_PIPELINE = os.getenv("HS_SEARCH_PIPELINE", "hybrid-pipeline")
+
+# Embedding
+EMBEDDING_MODEL = os.getenv("HS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIM = int(os.getenv("HS_EMBEDDING_DIM", "384"))

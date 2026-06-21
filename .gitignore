@@ -2,7 +2,7 @@
 __pycache__/
 *.py[oc]
 build/
-dist/
+dist/https://app.notion.com/p/cloudclub-official/8-385658aef0b8808a8030f6ca049a52a5?v=357658aef0b880a6935d000c1f58a6a0&source=copy_link
 wheels/
 *.egg-info
 

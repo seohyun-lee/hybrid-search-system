@@ -99,6 +99,13 @@ def prepare(limit: int) -> int:
                 "description": description,
                 "captions": example.get("caption"),
             }
+
+            # Persist the full record as a sidecar so the object store is the
+            # source of truth: the index can be rebuilt from S3 alone, without
+            # re-streaming the dataset or re-running the enrichment model.
+            metadata_url = storage.put_metadata(image_id, record)
+            record["metadata_url"] = metadata_url
+
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
             out.flush()
             seen.add(image_id)
