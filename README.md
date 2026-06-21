@@ -104,15 +104,17 @@ python -m http.server 8000 -d ./data/images   # image_url = http://localhost:800
 
 ## 스토리지 백엔드
 
-| 백엔드 | 이미지/사이드카 저장 위치 | 설정 |
-|--------|---------------------------|------|
-| `local` (기본) | `data/images/{id}.jpg` + `{id}.json` | `HS_STORAGE_BACKEND=local` |
-| `s3` | `s3://<bucket>/images/{id}.jpg` + `meta/{id}.json` | `HS_STORAGE_BACKEND=s3` + 아래 S3 변수 |
+| 백엔드 | 용도 | 이미지/사이드카 저장 위치 | 설정 |
+|--------|------|---------------------------|------|
+| `s3` | **실제 적재** | `s3://<bucket>/images/{id}.jpg` + `meta/{id}.json` | `HS_STORAGE_BACKEND=s3` + 아래 S3 변수 |
+| `local` | **테스트용** | `data/images/{id}.jpg` + `{id}.json` | `HS_STORAGE_BACKEND=local` |
 
-> ⚠️ **주의:** `HS_STORAGE_BACKEND=s3`이면 `prepare`가 **실제 S3 버킷에 업로드**한다.
-> `.env`에 S3 설정이 들어 있으면 의도치 않게 그 버킷으로 올라갈 수 있으니, 로컬 테스트는
-> `HS_STORAGE_BACKEND=local`로 명시하는 것을 권장한다:
-> `HS_STORAGE_BACKEND=local uv run python -m hybridsearch.ingest.prepare_dataset --limit 50`
+로컬 디렉터리는 S3 없이 파이프라인을 돌려보기 위한 대체물이다. 두 백엔드는 동일한
+`ObjectStorage` 인터페이스라 호출부 코드는 그대로고, 백엔드만 바꾸면 된다.
+
+> ⚠️ **주의:** S3 백엔드는 `prepare`가 **실제 S3 버킷에 업로드**한다. `.env`의
+> `HS_S3_BUCKET`이 올바른 버킷을 가리키는지 먼저 확인할 것. 빠르게 동작만 확인할 때는
+> S3를 건드리지 않도록 `HS_STORAGE_BACKEND=local`을 명시하는 게 안전하다.
 
 ## 설정 (환경변수)
 
