@@ -7,28 +7,69 @@ S3 없이 같은 파이프라인을 돌려보기 위한 대체물이다.
 
 ## 아키텍처 / 데이터 흐름
 
-```
-flickr30k (HF, streaming)
-      │
-      ▼
-[ Stage 0 ] prepare_dataset      이미지 + 메타데이터 사이드카 저장 → 스토리지
-      │                          레코드 1줄씩 기록            → data/manifest.jsonl
-      ▼
-data/manifest.jsonl  (canonical source / 이벤트 피드)
-      │
-      ▼
-[ producer ] publish_from_manifest   레코드 → 2개 이벤트 (key=image_id)
-      │                                ImageCreated  (1차): image_url + 기본 메타
-      │                                ImageEnriched (2차): description(캡션)
-      ▼
-Kafka topic `image-events`  ──(파티션별 순서, at-least-once)──▶  DLQ `image-events.dlq`
-      │
-      ▼
-[ consumer ] events.consumer (worker)  event_type 라우팅 → 2단계 색인:
-      │                                  index_basic      → ImageCreated  (ts_basic 가드)
-      │                                  index_enrichment → 캡션 임베딩(kNN) (ts_enriched 가드)
-      ▼
-OpenSearch index `images`  +  hybrid search pipeline
+```mermaid
+flowchart LR
+  classDef sehyun fill:#e8f3ee,stroke:#5aa886,color:#1f3d33;
+  classDef aerim  fill:#e6eefb,stroke:#5b8bd0,color:#1f3354;
+  classDef data   fill:#ece8e1,stroke:#b8b0a0,color:#3a352c;
+
+  HF["flickr30k<br/>HF · streaming"]:::data
+  U(("사용자")):::data
+
+  subgraph S0["Stage 0 · prepare_dataset"]
+    P["이미지 + 메타 사이드카 저장<br/>레코드 1줄씩 기록"]:::sehyun
+  end
+
+  ST[("Object Storage · S3/local<br/>이미지 + meta 사이드카")]:::data
+  MF[/"manifest.jsonl<br/>canonical · 이벤트 피드"/]:::data
+
+  PUB["producer · publish_from_manifest<br/>레코드 → 2개 이벤트 (key=image_id)"]:::sehyun
+
+  subgraph KAFKA["Kafka · MSK"]
+    direction TB
+    KT[("topic image-events<br/>파티션별 순서 · at-least-once")]:::data
+    DLQ[("image-events.dlq<br/>영구 오류 격리")]:::data
+  end
+
+  subgraph CON["consumer · events.consumer (worker)"]
+    direction TB
+    HE["handle_event<br/>event_type 라우팅"]:::sehyun
+    IB["index_basic<br/>ImageCreated · ts_basic 가드"]:::sehyun
+    IE["index_enrichment<br/>캡션(BM25)+임베딩(kNN) · ts_enriched 가드"]:::sehyun
+    HE --> IB
+    HE --> IE
+  end
+
+  OS[("OpenSearch · images<br/>BM25 + kNN · hybrid pipeline")]:::sehyun
+  QC["Query Coordinator · FastAPI :8000<br/>정규화 → 캐시 → 임베딩 → hybrid"]:::aerim
+  FE["Streamlit FE :8501"]:::aerim
+
+  %% --- write path (event-driven) ---
+  HF --> P
+  P --> ST
+  P --> MF
+  MF --> PUB
+  PUB -->|ImageCreated / ImageEnriched| KT
+  KT --> HE
+  KT -. 영구 오류 .-> DLQ
+  ST -. 재색인 시 벡터·메타 재사용 .-> IE
+  IB -->|guarded upsert| OS
+  IE -->|guarded upsert| OS
+
+  %% --- 직접 색인 (Kafka 우회 · 개발/백필) ---
+  MF -. run_from_manifest 직접 호출 .-> CON
+
+  %% --- read path ---
+  U --> FE -->|/search| QC
+  QC -->|match + knn| OS
+  OS -. hits .-> QC
+
+  subgraph L["범례"]
+    direction LR
+    L1["서현"]:::sehyun
+    L2["애림"]:::aerim
+    L3["공통 데이터"]:::data
+  end
 ```
 
 - **스토리지가 source of truth.** 이미지 옆에 메타데이터 JSON(사이드카)을 같이 저장하고,
