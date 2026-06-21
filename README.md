@@ -63,13 +63,6 @@ flowchart LR
   U --> FE -->|/search| QC
   QC -->|match + knn| OS
   OS -. hits .-> QC
-
-  subgraph L["범례"]
-    direction LR
-    L1["서현"]:::sehyun
-    L2["애림"]:::aerim
-    L3["공통 데이터"]:::data
-  end
 ```
 
 - **스토리지가 source of truth.** 이미지 옆에 메타데이터 JSON(사이드카)을 같이 저장하고,
