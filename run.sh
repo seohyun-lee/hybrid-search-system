@@ -1,8 +1,10 @@
 #!/usr/bin/env sh
-# Build & run the hybrid search stack (OpenSearch + API), index, and query.
+# Build & run the hybrid search API, index, and query.
+# Connects to AWS Managed OpenSearch + S3 using the values in .env (no local
+# OpenSearch container) — run from inside the VPC, e.g. on EC2.
 #
 # Usage:
-#   ./run.sh up                 # build + start opensearch & app
+#   ./run.sh up                 # build + start the API
 #   ./run.sh index [--recreate] # index the manifest into OpenSearch
 #   ./run.sh search "<query>"   # run a hybrid search via the API
 #   ./run.sh logs               # tail the app logs
@@ -19,7 +21,7 @@ usage() {
 
 up() {
   docker compose up -d --build
-  echo "stack up. API: ${API_URL}  (docs: ${API_URL}/docs)"
+  echo "API up: ${API_URL}  (docs: ${API_URL}/docs)"
 }
 
 index() {

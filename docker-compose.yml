@@ -1,38 +1,15 @@
 services:
-  opensearch:
-    image: opensearchproject/opensearch:2.13.0
-    container_name: opensearch-dev
-    environment:
-      - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true          # dev only: no auth / SSL (skips demo-config password requirement)
-      - bootstrap.memory_lock=true
-      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
-    ulimits:
-      memlock: { soft: -1, hard: -1 }
-    ports:
-      - "9200:9200"
-    healthcheck:
-      # Lets `app` wait for a queryable cluster (depends_on: service_healthy).
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-
   app:
     build: .
     container_name: hybridsearch-api
-    depends_on:
-      opensearch:
-        condition: service_healthy
-    environment:
-      # Reach OpenSearch over the compose network, not localhost.
-      - OPENSEARCH_HOST=opensearch
-      - OPENSEARCH_PORT=9200
-      - OPENSEARCH_USE_SSL=false
+    # Connects to AWS Managed OpenSearch + S3 using the values in .env
+    # (OPENSEARCH_HOST/PORT, HS_STORAGE_BACKEND=s3, ...). No local OpenSearch.
+    # On EC2 the app reaches the VPC domain directly; AWS credentials come from
+    # the instance role via IMDS, so .env keeps the AWS_* keys commented out.
     env_file:
-      - path: .env                             # optional; overrides the above if present
-        required: false
+      # Required: the whole connection (Managed host, S3 bucket) lives here.
+      - path: .env
+        required: true
     ports:
       - "8000:8000"
     volumes:

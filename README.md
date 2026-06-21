@@ -46,7 +46,7 @@ hybridsearch/
   index/
     worker.py                index_basic / index_enrichment (2단계 색인)
     run_from_manifest.py     Stage 1: manifest → OpenSearch 색인 드라이버
-docker-compose.yml           로컬 OpenSearch (보안 비활성, 개발용)
+docker-compose.yml           API 컨테이너 (.env 로 AWS Managed OpenSearch + S3 에 연결)
 files-by-claude/             참고용 스캐폴드 (현재 패키지가 이걸 기반으로 발전)
 ```
 
@@ -59,13 +59,14 @@ uv sync
 
 ## 사용법
 
-### 1) OpenSearch 띄우기
+### 1) OpenSearch 연결 (AWS Managed)
+
+색인·검색은 `.env`가 가리키는 AWS Managed OpenSearch 도메인에 붙는다(로컬 도커
+OpenSearch는 없음). 도메인이 VPC 전용이라 **VPC 안(EC2 등)에서 실행**해야 닿는다.
 
 ```bash
-docker compose up -d
-export OPENSEARCH_USE_SSL=false        # 개발용 컨테이너는 보안 비활성
-# 준비 확인 (status: green/yellow 나오면 OK)
-curl -s localhost:9200/_cluster/health
+# .env 에 OPENSEARCH_HOST / OPENSEARCH_AUTH 설정 후, VPC 안에서 준비 확인
+curl -s "https://${OPENSEARCH_HOST}/_cluster/health"   # status: green/yellow 면 OK
 ```
 
 ### 2) 데이터 준비 (Stage 0)
@@ -125,7 +126,7 @@ python -m http.server 8000 -d ./data/images   # image_url = http://localhost:800
 |------|------|------|------|
 | `basic` | **AWS Managed (운영)** | HTTPS:443 | 마스터 유저 ID/PW (FGAC) |
 | `iam` | AWS Managed (대안) | HTTPS:443 | AWS SigV4 서명 (비번 없음, EC2 롤 등) |
-| `local` (기본) | 로컬 도커 (개발) | http:9200 | 보안 비활성 |
+| `local` (기본) | 직접 띄운 OpenSearch / 개방형 도메인 / SSM 터널 | http:9200 또는 https | 인증 무시(보안 비활성·개방형) |
 
 ### AWS Managed 연결 (basic) — `.env`
 
@@ -181,27 +182,24 @@ OPENSEARCH_PASSWORD=<master-password>
 전체 항목은 [`.env.example`](.env.example) 참고. 자주 쓰는 조합:
 
 ```dotenv
-# 로컬 개발 (기본): 로컬 도커 OpenSearch + 로컬 디렉터리 스토리지
-HS_STORAGE_BACKEND=local
-OPENSEARCH_AUTH=local
+# 운영 (이 프로젝트 기본): S3 적재 + 개방형 AWS Managed OpenSearch
+HS_STORAGE_BACKEND=s3
+HS_S3_BUCKET=your-bucket
+AWS_REGION=ap-northeast-2
+OPENSEARCH_AUTH=local          # 개방형(VPC 제한) 도메인이라 인증 불필요
+OPENSEARCH_HOST=vpc-xxxxx.ap-northeast-2.es.amazonaws.com
+OPENSEARCH_PORT=443
+OPENSEARCH_USE_SSL=true
+# AWS 자격증명은 EC2 인스턴스 롤에서 자동(IMDS) — AWS_ACCESS_KEY_ID 등은 비워둠
 
-# 운영: S3 적재 + AWS Managed OpenSearch (basic)
-# HS_STORAGE_BACKEND=s3
-# HS_S3_BUCKET=your-bucket
-# AWS_REGION=ap-northeast-2
-# OPENSEARCH_AUTH=basic
-# OPENSEARCH_HOST=search-xxxxx.ap-northeast-2.es.amazonaws.com
-# OPENSEARCH_PORT=443
-# OPENSEARCH_USER=<master-user>
-# OPENSEARCH_PASSWORD=<master-password>
+# IAM 잠금 도메인일 때:        OPENSEARCH_AUTH=iam
+# basic(FGAC) 도메인일 때:     OPENSEARCH_AUTH=basic + OPENSEARCH_USER/PASSWORD
 ```
 
 ## 메모
 
 - kNN 엔진이 `cosinesimil`을 거부하면 `hybridsearch/search/index.py`에서 `space_type`을
   `l2`로 교체한다(임베딩이 정규화돼 있어 순위는 동일). 변경 시 인덱스 재생성(`--recreate`) 필요.
-- 개발용 OpenSearch는 `DISABLE_SECURITY_PLUGIN=true`로 보안을 끈다(2.12+는 보안 활성 시
-  `OPENSEARCH_INITIAL_ADMIN_PASSWORD`를 요구함).
 - 하이브리드 융합: 각 서브쿼리 점수를 min-max 정규화 후 가중 산술평균(BM25:kNN = 0.4:0.6).
 
 ## 다음 단계
