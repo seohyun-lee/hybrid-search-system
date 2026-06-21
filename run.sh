@@ -4,11 +4,13 @@
 # OpenSearch container) — run from inside the VPC, e.g. on EC2.
 #
 # Usage:
-#   ./run.sh up                 # build + start the API (8000) + Streamlit FE (8501)
+#   ./run.sh up                 # build + start API (8000) + Streamlit FE (8501) + Kafka worker
 #   ./run.sh smoke              # safe dry-run: index a few records into a throwaway index, then clean up
-#   ./run.sh index [--recreate] # index the manifest into OpenSearch
+#   ./run.sh kafka-init         # create the image-events topic + DLQ (run once)
+#   ./run.sh publish [--limit N]# replay manifest -> Kafka events (the worker indexes them)
+#   ./run.sh index [--recreate] # index the manifest directly into OpenSearch (no Kafka)
 #   ./run.sh search "<query>"   # run a hybrid search via the API
-#   ./run.sh logs               # tail the app logs
+#   ./run.sh logs [service]     # tail logs (default: app; e.g. worker / fe)
 #   ./run.sh down               # stop & remove containers
 #   ./run.sh all "<query>"      # up -> index --recreate -> search
 set -eu
@@ -20,7 +22,7 @@ SMOKE_INDEX="${SMOKE_INDEX:-images_smoke}"
 SMOKE_N="${SMOKE_N:-20}"
 
 usage() {
-  sed -n '2,13p' "$0"
+  sed -n '2,15p' "$0"
   exit "${1:-0}"
 }
 
@@ -74,19 +76,35 @@ search() {
   echo
 }
 
-logs() { docker compose logs -f app; }
+kafka_init() {
+  # Create the image-events topic + DLQ. Idempotent; run once after the cluster
+  # is reachable and before the first publish.
+  docker compose run --rm worker \
+    uv run --no-dev python -m hybridsearch.events.admin
+}
+
+publish() {
+  # Replay the manifest onto Kafka as ImageCreated + ImageEnriched events. The
+  # worker (started by `up`) consumes them and indexes into OpenSearch.
+  docker compose run --rm worker \
+    uv run --no-dev python -m hybridsearch.events.publish_from_manifest "$@"
+}
+
+logs() { docker compose logs -f "${1:-app}"; }
 down() { docker compose down; }
 
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift || true
 
 case "$cmd" in
-  up)     up ;;
-  smoke)  smoke ;;
-  index)  index "$@" ;;
-  search) search "$@" ;;
-  logs)   logs ;;
-  down)   down ;;
+  up)         up ;;
+  smoke)      smoke ;;
+  kafka-init) kafka_init ;;
+  publish)    publish "$@" ;;
+  index)      index "$@" ;;
+  search)     search "$@" ;;
+  logs)       logs "$@" ;;
+  down)       down ;;
   all)
     up
     index --recreate

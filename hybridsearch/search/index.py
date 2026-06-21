@@ -40,7 +40,11 @@ INDEX_BODY = {
                 },
             },
             "phase": {"type": "keyword"},  # basic | enriched
-            "event_ts": {"type": "long"},  # ordering / idempotency guard
+            # Per-phase stale-overwrite guards = each event's occurred_at (epoch ms).
+            # The worker writes ts_basic on ImageCreated, ts_enriched on ImageEnriched,
+            # and applies a phase's fields only if its own ts advances (see index/worker.py).
+            "ts_basic": {"type": "long"},
+            "ts_enriched": {"type": "long"},
             "updated_at": {"type": "date"},
         }
     },
