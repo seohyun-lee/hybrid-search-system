@@ -1,7 +1,8 @@
 # Hybrid Search System
 
-이미지 캡션에 대한 **하이브리드 검색**(BM25 키워드 + kNN 시맨틱) 시스템. flickr30k를
-받아 이미지는 오브젝트 스토리지(**실제 백엔드는 S3**)에 저장하고, 캡션은 OpenSearch에
+이미지 캡션에 대한 **하이브리드 검색**(BM25 키워드 + kNN 시맨틱) 시스템.
+[flickr30k](https://huggingface.co/datasets/lmms-lab/flickr30k)를
+받아 이미지는 오브젝트 스토리지(S3)에 저장하고, 캡션은 OpenSearch에
 색인해 키워드 + 의미 기반 검색을 함께 제공한다. 로컬 디렉터리 백엔드는 **테스트용**으로,
 S3 없이 같은 파이프라인을 돌려보기 위한 대체물이다.
 
@@ -172,7 +173,7 @@ uv run python -m hybridsearch.ingest.prepare_dataset --limit 10000
 ```
 
 - `--limit`은 "manifest 총량 목표"라 **재실행하면 이어받기**(resumable)된다. 캡션 없는 행은 건너뛴다.
-- flickr30k(`test` split)는 총 약 **31,783장**이 상한. parquet에 이미지 바이너리가 들어 있어
+- [flickr30k](https://huggingface.co/datasets/lmms-lab/flickr30k)(`test` split)는 총 약 **31,783장**이 상한. parquet에 이미지 바이너리가 들어 있어
   streaming이어도 받는 데이터량이 적지 않다(1만 장 ≈ 수 GB).
 
 ### 3) OpenSearch 색인 (Stage 1)
