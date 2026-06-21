@@ -405,12 +405,20 @@ OPENSEARCH_USE_SSL=true
 하이브리드 융합은 크게 두 갈래다 — **score normalization**(현행, `normalization-processor`)과
 **RRF**(Reciprocal Rank Fusion, `score-ranker-processor`). 이 프로젝트는 **normalization을 유지**한다.
 
-| | normalization (현행) | RRF |
+| | min-max normalization + 가중 산술평균 (현행) | RRF |
 |---|---|---|
-| 합치는 기준 | 각 서브쿼리의 **raw 점수** (min-max 정규화 후 가중평균) | 점수 무시, **순위(rank)만** → `Σ 1/(k+rank)` |
+| 합치는 식 | `Σ wᵢ · (sᵢ − minᵢ)/(maxᵢ − minᵢ)` — 점수를 [0,1]로 정규화 후 **가중 산술평균** | `Σ 1/(k + rankᵢ)` — 점수 버리고 **순위만** (k=60 기본) |
+| 합치는 기준 | 각 서브쿼리의 **raw 점수** (정규화해 스케일만 맞춤) | 점수 무시, **순위(rank)만** |
 | 가중치 | 있음 (`0.4 / 0.6`, 요청별 조정 가능) | 기본적으로 의미 약함 (순위 기반) |
 | 튜닝 | 가중치·정규화 튜닝 필요 | 거의 불필요 (스케일 차이에 robust) |
 | OpenSearch | `normalization-processor` (성숙·기본) | `score-ranker-processor` (**2.19+** 필요) |
+
+**언제 갈리나 (예시):** 어떤 문서가 BM25에선 압도적 1위(정규화 `1.0`)인데 kNN에선 10위(정규화 `0.2`)라면 —
+- normalization: `0.4·1.0 + 0.6·0.2 = 0.52` → "키워드로 강하게 맞았다"는 **점수 크기**가 랭킹에 반영된다.
+- RRF(k=60): `1/(60+1) + 1/(60+10) ≈ 0.031` → 1위든 1.0이든 "1위라는 순위"만 반영, 크기 정보는 사라진다.
+
+즉 점수 분포가 한쪽으로 치우칠수록 두 방식의 랭킹이 갈린다. normalization은 신호 세기를 살리고,
+RRF는 스케일이 제각각인 이종 점수(BM25 vs 코사인)를 순위로 평준화해 robust하다.
 
 선택 사유:
 1. **버전/성숙도** — AWS Managed OpenSearch에서 `normalization-processor`는 오래 검증된 기본 방식이고,
