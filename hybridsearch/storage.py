@@ -1,0 +1,87 @@
+"""Object storage abstraction.
+
+Today we write images to a local directory. Later, swapping to S3 means
+implementing S3Storage and flipping HS_STORAGE_BACKEND=s3 — nothing else in the
+pipeline (prepare script / worker) changes, because everyone depends only on the
+ObjectStorage interface and the returned URL.
+"""
+from __future__ import annotations
+
+import abc
+from pathlib import Path
+
+from PIL import Image
+
+from . import config
+
+
+class ObjectStorage(abc.ABC):
+    """Stores image bytes under a stable key (image_id) and returns its URL."""
+
+    @abc.abstractmethod
+    def put_image(self, image_id: str, image: Image.Image) -> str:
+        """Persist `image` for `image_id` and return the URL to reach it."""
+
+    @abc.abstractmethod
+    def exists(self, image_id: str) -> bool:
+        """True if an object for `image_id` is already stored (for resume/idempotency)."""
+
+    @abc.abstractmethod
+    def url_for(self, image_id: str) -> str:
+        """The URL an object for `image_id` would have, without storing it."""
+
+
+class LocalStorage(ObjectStorage):
+    """Writes JPEGs to a local directory. Drop-in stand-in for S3 during dev."""
+
+    def __init__(self, images_dir: Path, base_url: str):
+        self.images_dir = Path(images_dir)
+        self.base_url = base_url.rstrip("/")
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+
+    def _key(self, image_id: str) -> str:
+        return f"{image_id}.jpg"
+
+    def _path(self, image_id: str) -> Path:
+        return self.images_dir / self._key(image_id)
+
+    def url_for(self, image_id: str) -> str:
+        return f"{self.base_url}/{self._key(image_id)}"
+
+    def exists(self, image_id: str) -> bool:
+        return self._path(image_id).exists()
+
+    def put_image(self, image_id: str, image: Image.Image) -> str:
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        image.save(self._path(image_id), format="JPEG", quality=90)
+        return self.url_for(image_id)
+
+
+class S3Storage(ObjectStorage):
+    """Future: upload to S3, return the object URL. Same interface as LocalStorage."""
+
+    def __init__(self, bucket: str, base_url: str):
+        self.bucket = bucket
+        self.base_url = base_url.rstrip("/")
+
+    def put_image(self, image_id: str, image: Image.Image) -> str:  # pragma: no cover
+        raise NotImplementedError(
+            "S3Storage not implemented yet. Set HS_STORAGE_BACKEND=local for now."
+        )
+
+    def exists(self, image_id: str) -> bool:  # pragma: no cover
+        raise NotImplementedError
+
+    def url_for(self, image_id: str) -> str:  # pragma: no cover
+        return f"{self.base_url}/{image_id}.jpg"
+
+
+def get_storage() -> ObjectStorage:
+    """Construct the storage backend selected by config."""
+    backend = config.STORAGE_BACKEND.lower()
+    if backend == "local":
+        return LocalStorage(config.IMAGES_DIR, config.STORAGE_BASE_URL)
+    if backend == "s3":
+        return S3Storage(config.S3_BUCKET, config.STORAGE_BASE_URL)
+    raise ValueError(f"Unknown HS_STORAGE_BACKEND: {config.STORAGE_BACKEND!r}")
