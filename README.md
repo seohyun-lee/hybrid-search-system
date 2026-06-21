@@ -157,7 +157,10 @@ OPENSEARCH_PASSWORD=<master-password>
 | `HS_MANIFEST_PATH` | `./data/manifest.jsonl` | manifest 경로 (항상 로컬) |
 | `HS_STORAGE_BASE_URL` | `http://localhost:8000/images` | local 서빙 주소 / S3는 비워두면 자동 유도 |
 | `HS_S3_BUCKET` | (빈값) | S3 버킷명 |
-| `AWS_REGION` | `ap-northeast-2` | S3 리전 |
+| `AWS_REGION` | `ap-northeast-2` | S3 / SigV4 리전 |
+| `AWS_ACCESS_KEY_ID` | (빈값) | IAM 액세스 키. 비우면 boto3 기본 체인(`~/.aws` / EC2 롤) 사용 |
+| `AWS_SECRET_ACCESS_KEY` | (빈값) | IAM 시크릿 키. `AWS_ACCESS_KEY_ID`와 한 쌍 |
+| `AWS_SESSION_TOKEN` | (빈값) | 임시(STS) 자격증명일 때만 |
 | `HS_S3_IMAGE_PREFIX` | `images` | S3 이미지 키 prefix |
 | `HS_S3_META_PREFIX` | `meta` | S3 메타데이터 키 prefix |
 | `HS_DATASET_NAME` | `lmms-lab/flickr30k` | HF 데이터셋 (parquet 미러) |
