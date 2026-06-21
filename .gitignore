@@ -2,7 +2,7 @@
 __pycache__/
 *.py[oc]
 build/
-dist/https://app.notion.com/p/cloudclub-official/8-385658aef0b8808a8030f6ca049a52a5?v=357658aef0b880a6935d000c1f58a6a0&source=copy_link
+dist/
 wheels/
 *.egg-info
 
@@ -11,6 +11,10 @@ wheels/
 
 # Generated data (images + manifest)
 /data/
+
+# Bare-mode app runtime (run-fe.sh / run-event.sh): pids + logs
+/.run/
+/logs/
 
 .env
 .env.local

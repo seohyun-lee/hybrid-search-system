@@ -1,7 +1,8 @@
 # Hybrid Search System
 
-이미지 캡션에 대한 **하이브리드 검색**(BM25 키워드 + kNN 시맨틱) 시스템. flickr30k를
-받아 이미지는 오브젝트 스토리지(**실제 백엔드는 S3**)에 저장하고, 캡션은 OpenSearch에
+이미지 캡션에 대한 **하이브리드 검색**(BM25 키워드 + kNN 시맨틱) 시스템.
+[flickr30k](https://huggingface.co/datasets/lmms-lab/flickr30k)를
+받아 이미지는 오브젝트 스토리지(S3)에 저장하고, 캡션은 OpenSearch에
 색인해 키워드 + 의미 기반 검색을 함께 제공한다. 로컬 디렉터리 백엔드는 **테스트용**으로,
 S3 없이 같은 파이프라인을 돌려보기 위한 대체물이다.
 
@@ -23,24 +24,41 @@ flowchart LR
   ST[("Object Storage · S3/local<br/>이미지 + meta 사이드카")]:::data
   MF[/"manifest.jsonl<br/>canonical · 이벤트 피드"/]:::data
 
-  subgraph S1["Stage 1 · run_from_manifest · 2단계 색인"]
+  PUB["producer · publish_from_manifest<br/>레코드 → 2개 이벤트 (key=image_id)<br/>현재 유일 producer · 실서비스 발행은 예정"]:::sehyun
+
+  subgraph KAFKA["Kafka · MSK"]
     direction TB
-    IB["index_basic<br/>URL + 기본 메타 · 1차"]:::sehyun
-    IE["index_enrichment<br/>캡션(BM25) + 임베딩(kNN) · 2차"]:::sehyun
+    KT[("topic image-events<br/>파티션별 순서 · at-least-once")]:::data
+    DLQ[("image-events.dlq<br/>영구 오류 격리")]:::data
+  end
+
+  subgraph CON["consumer · events.consumer (worker)"]
+    direction TB
+    HE["handle_event<br/>event_type 라우팅"]:::sehyun
+    IB["index_basic<br/>ImageCreated · ts_basic 가드"]:::sehyun
+    IE["index_enrichment<br/>캡션(BM25)+임베딩(kNN) · ts_enriched 가드"]:::sehyun
+    HE --> IB
+    HE --> IE
   end
 
   OS[("OpenSearch · images<br/>BM25 + kNN · hybrid pipeline")]:::sehyun
   QC["Query Coordinator · FastAPI :8000<br/>정규화 → 캐시 → 임베딩 → hybrid"]:::aerim
   FE["Streamlit FE :8501"]:::aerim
 
-  %% --- write path ---
+  %% --- write path (event-driven) ---
   HF --> P
   P --> ST
   P --> MF
-  MF --> S1
-  ST -. 재색인 시 메타·이미지 재사용 .-> S1
-  IB -->|doc_as_upsert 멱등| OS
-  IE -->|doc_as_upsert 멱등| OS
+  MF --> PUB
+  PUB -->|ImageCreated / ImageEnriched| KT
+  KT --> HE
+  KT -. 영구 오류 .-> DLQ
+  ST -. 재색인 시 벡터·메타 재사용 .-> IE
+  IB -->|guarded upsert| OS
+  IE -->|guarded upsert| OS
+
+  %% --- 직접 색인 (Kafka 우회 · 개발/백필) ---
+  MF -. run_from_manifest 직접 호출 .-> CON
 
   %% --- read path ---
   U --> FE -->|/search| QC
@@ -51,9 +69,50 @@ flowchart LR
 - **스토리지가 source of truth.** 이미지 옆에 메타데이터 JSON(사이드카)을 같이 저장하고,
   색인 단계에서 임베딩 벡터를 사이드카에 되써 넣는다. 그래서 인덱스가 날아가도 스토리지만으로
   재색인할 수 있고, 비싼 임베딩 모델을 다시 돌릴 필요가 없다.
-- **2단계 색인**(`index_basic` / `index_enrichment`)은 실제 시스템의 두 Kafka 이벤트를 모델링한
-  것. 둘 다 `doc_as_upsert`라 멱등하고 순서에 무관하며, 서로 겹치지 않는 필드만 쓴다.
+- **이벤트 구동 색인.** 두 서비스(업로드/캡셔닝)가 발행하는 `ImageCreated`/`ImageEnriched`를
+  단일 토픽 `image-events`(key=`image_id`)로 흘려보내고, consumer 워커가 색인한다. 오프셋은
+  OpenSearch upsert 성공 후 수동 커밋(at-least-once) → 크래시 시 재처리되지만 아래 가드가 흡수한다.
+- **phase별 stale-overwrite 가드.** 두 phase는 서로 겹치지 않는 필드 + 각자의 타임스탬프
+  (`ts_basic`/`ts_enriched` = 이벤트 `occurred_at`)만 쓴다. 순서가 뒤바뀌어도 손실이 없고,
+  같은 phase의 오래된 재전달(`ts < 저장값`)은 `ctx.op='noop'`으로 버린다 (`index/worker.py`).
+- **Kafka 없이 직접 색인**도 가능: `run_from_manifest`가 같은 두 함수를 순차 호출한다(개발/백필용).
+- **`manifest.jsonl`은 "지금까지 준비된 이미지 전체 목록"이다 (이미지 1장 = JSONL 한 줄).** 실제 한 줄:
+  ```json
+  {"image_id":"1000092795","image_url":".../1000092795.jpg","width":333,"height":500,
+   "source":"lmms-lab/flickr30k","description":"Two young guys ...","captions":["...", "..."]}
+  ```
+  진짜 운영 서비스라면 사용자가 이미지를 올릴 때 업로드/캡셔닝 서비스가 `ImageCreated`/`ImageEnriched`를
+  **직접** Kafka에 쏜다. 하지만 이 프로젝트는 flickr30k로 만든 데모라 그런 서비스가 없어서,
+  `publish_from_manifest`가 **manifest를 한 줄씩 읽어 "방금 올라온 이미지인 척" 이벤트를 발행**한다
+  (한 줄 → `ImageCreated`: image_id/url/width/height/source + `ImageEnriched`: description=BM25, captions→임베딩=kNN).
+  **그래서 manifest가 Kafka로 들어갈 이벤트의 유일한 출처**다. manifest가 없으면:
+  - `publish_from_manifest`가 읽을 게 없어 **발행 이벤트 0건** → 워커도 색인할 게 없다.
+  - `prepare_dataset`이 "이 image_id 이미 받았나"를 manifest로 판단하는데, 없으면 다 안 받은 줄 알고
+    **flickr30k 3.2만 장을 처음부터 재다운로드**한다.
+  - 인덱스를 `--recreate`로 날리거나 토픽을 다시 만든 뒤 **다시 채워 넣을 원본 목록**이 manifest인데, 없으면 못 채운다.
+  - Kafka를 안 쓰는 `run_from_manifest` 직접 색인도 manifest를 입력으로 읽으므로 **실행 자체가 안 된다**.
 - `manifest`는 항상 로컬 파일(스토리지 백엔드와 무관). 이미지/사이드카만 백엔드로 나간다.
+
+### manifest 추가 설명 : manifest 한 줄 ≠ 이벤트 1개 (1차·2차 분리)
+
+manifest는 *이벤트 로그*가 아니라 **이미지 원본 목록**이다. 발행 시 한 줄이 **두 이벤트로 쪼개진다**:
+
+```
+manifest 한 줄
+├─ image_id · image_url · width · height · source  ─→ 1차 ImageCreated  (이미지가 "존재")
+└─ description · captions                            ─→ 2차 ImageEnriched (캡션 붙어 "검색 가능")
+```
+
+| | 1차 `ImageCreated` | 2차 `ImageEnriched` |
+|---|---|---|
+| 의미 | 이미지가 생겼다(존재) | 캡션이 붙어 검색 가능해졌다 |
+| 필드 | image_id · image_url · width · height · source | description(→BM25) · captions→임베딩(→kNN) |
+| 색인 후 | 이미지·메타는 결과에 뜨지만 검색엔 안 잡힘 | 비로소 키워드·의미 검색에 잡힘 |
+| 가드 | `ts_basic` | `ts_enriched` |
+
+둘로 나누는 이유: 실제론 **이미지 업로드(즉시)** 와 **AI 캡셔닝(나중)** 의 시점이 다르기 때문이다. flickr30k는
+캡션이 이미 있어 manifest 한 줄에 둘 다 들어있지만, "두 시점에 따로 도착하는" 흐름을 흉내 내려 일부러 쪼개
+발행한다 — 그래서 2차가 먼저 오거나·1차만 오거나·중복 재전송돼도 안전하도록 위의 `ts_basic`/`ts_enriched` 가드를 둔다.
 
 ## 프로젝트 구조
 
@@ -68,8 +127,14 @@ hybridsearch/
     client.py                OpenSearch 클라이언트 팩토리
     index.py                 인덱스 매핑(text + knn_vector) + 하이브리드 search pipeline
   index/
-    worker.py                index_basic / index_enrichment (2단계 색인)
-    run_from_manifest.py     Stage 1: manifest → OpenSearch 색인 드라이버
+    worker.py                index_basic / index_enrichment + handle_event (phase별 가드 upsert)
+    run_from_manifest.py     manifest → OpenSearch 직접 색인 드라이버 (Kafka 우회)
+  events/
+    schema.py                이벤트 봉투 + 타입(ImageCreated/Enriched) + 검증
+    producer.py              Kafka 프로듀서 (key=image_id)
+    consumer.py              consumer 워커: image-events → 색인, 수동 커밋, 재시도/DLQ
+    publish_from_manifest.py manifest → Kafka 이벤트 리플레이 (프로듀서 데모)
+    admin.py                 토픽 + DLQ 생성 (멱등)
 main.py                      Query Coordinator (FastAPI): 정규화→캐시→임베딩→hybrid 쿼리→매핑
 streamlit_app.py             Streamlit FE (8501): 검색창 + 결과 그리드, 코디네이터 /search만 호출
 docker-compose.yml           app(FastAPI 8000) + fe(Streamlit 8501) — .env 로 Managed OpenSearch + S3 연결
@@ -108,7 +173,7 @@ uv run python -m hybridsearch.ingest.prepare_dataset --limit 10000
 ```
 
 - `--limit`은 "manifest 총량 목표"라 **재실행하면 이어받기**(resumable)된다. 캡션 없는 행은 건너뛴다.
-- flickr30k(`test` split)는 총 약 **31,783장**이 상한. parquet에 이미지 바이너리가 들어 있어
+- [flickr30k](https://huggingface.co/datasets/lmms-lab/flickr30k)(`test` split)는 총 약 **31,783장**이 상한. parquet에 이미지 바이너리가 들어 있어
   streaming이어도 받는 데이터량이 적지 않다(1만 장 ≈ 수 GB).
 
 ### 3) OpenSearch 색인 (Stage 1)
@@ -137,6 +202,31 @@ uv run python -m hybridsearch.index.run_from_manifest
 > ./run.sh index --recreate
 > ```
 
+### 3-K) 이벤트 구동 색인 (Kafka)
+
+운영 경로는 위의 직접 색인 대신 Kafka를 거친다. `publish_from_manifest`(프로듀서)가 레코드를
+`ImageCreated`/`ImageEnriched` 두 이벤트로 쪼개 `image-events`(key=`image_id`)에 발행하고,
+consumer 워커가 소비해 색인한다. (`.env`의 `HS_KAFKA_BOOTSTRAP` 필요, VPC 안에서 실행)
+
+```bash
+./run.sh kafka-init                 # 토픽 image-events + DLQ 생성 (1회)
+./run.sh up                         # API + FE + consumer 워커 기동 (워커가 상시 소비)
+./run.sh publish --limit 50         # manifest 50건 -> 100개 이벤트 발행
+./run.sh logs worker                # 워커 색인 로그 확인
+```
+
+도커 없이 직접 실행할 때 (워커는 `run-event.sh`로 — 아래 *4-R* 참고):
+```bash
+uv run python -m hybridsearch.events.admin                            # 토픽 생성
+./run-event.sh bare                                                   # 워커 상시 (pid→.run, 로그→logs)
+uv run python -m hybridsearch.events.publish_from_manifest --limit 50
+```
+
+- **at-least-once + 멱등.** 오프셋은 OpenSearch upsert 성공 후 커밋 → 재처리(중복)는 phase별 ts 가드가 흡수.
+- **순서.** key=`image_id`라 한 이미지의 1·2차가 같은 파티션에 순서대로 적재된다(토픽을 쪼개면 깨짐).
+- **DLQ.** 스키마 불일치·알 수 없는 타입 등 영구 오류는 `image-events.dlq`로 분리. transient(OpenSearch 5xx/연결)만 백오프 재시도.
+- **확장.** `docker compose up -d --scale worker=2`로 파티션 수까지 워커를 수평 확장.
+
 ### 4) 검색: Query Coordinator(FastAPI) + Streamlit FE
 
 `./run.sh up`이 두 컨테이너를 같이 띄운다 — **app**(코디네이터, 8000)과 **fe**(Streamlit, 8501).
@@ -160,9 +250,40 @@ uv run python -m hybridsearch.index.run_from_manifest
   전달되고, 코디네이터가 해당 가중치로 **인라인 파이프라인**을 만들어 검색한다(명시 안 하면 명명 파이프라인 사용).
 - **enriched 안 된 문서**는 `caption_vector`가 없어 kNN에 자동으로 안 잡힌다.
 
-> API만 따로 띄우려면: `uv run uvicorn main:app --host 0.0.0.0 --port 8000`
-> FE만 따로 띄우려면: `uv run streamlit run streamlit_app.py --server.port 8501`
-> (FE는 `HS_API_URL`이 가리키는 코디네이터를 호출 — 기본 `http://localhost:8000`)
+> API+FE를 `run.sh`(compose 전체) 없이 따로 띄우려면 아래 *4-R*의 `run-fe.sh`를 쓴다.
+> (FE는 `HS_API_URL`이 가리키는 코디네이터를 호출 — bare면 기본 `http://localhost:8000`)
+
+### 4-R) 앱 실행 스크립트 — `run-event.sh` / `run-fe.sh`
+
+`run.sh`는 데이터 업로드/색인 전용이고, **앱 실행은 두 스크립트로 분리**돼 있다. 각각 `docker`(compose)와
+`bare`(도커 없이 호스트 프로세스, uv) 모드를 지원한다. bare 모드는 pid를 `.run/`, 로그를 `logs/`에 쓴다(둘 다 gitignore).
+
+| 스크립트 | 대상 | `docker` | `bare` |
+|----------|------|----------|--------|
+| `run-event.sh` | Kafka consumer 워커 | `docker compose up -d worker` | `python -m hybridsearch.events.consumer` |
+| `run-fe.sh` | API(8000) + Streamlit(8501) | `docker compose up -d app fe` | `uvicorn` + `streamlit` |
+
+```bash
+./run-event.sh docker|bare        # 워커 기동
+./run-fe.sh    docker|bare        # API + FE 기동
+./run-event.sh down [docker|bare] # 종료 (생략 시 양쪽 다 정리)
+./run-fe.sh    logs [docker|bare] # 로그 tail (기본 docker)
+```
+
+**실행 순서** (이벤트 구동 색인 기준, Managed OpenSearch/S3/MSK는 이미 떠 있다고 가정):
+
+```bash
+./run.sh kafka-init           # 1) 토픽 생성 (최초 1회)
+./run-event.sh bare           # 2) 워커 먼저 (publish 이벤트를 소비해야 하므로)
+./run.sh publish --limit 50   # 3) manifest → Kafka → 워커가 OpenSearch에 색인
+./run-fe.sh bare              # 4) API + FE 기동
+curl -s localhost:8000/health # 5) 확인 → 브라우저로 http://<host>:8501
+```
+
+- worker(2)를 publish(3)보다 먼저 띄운다. consumer group이라 늦게 떠도 따라잡지만, 먼저 올리는 게 안전.
+- **FE와 API는 같은 모드로 묶어서 띄운다**: docker FE는 `HS_API_URL=http://app:8000`(compose 네트워크), bare FE는 `localhost:8000`을 본다. `run-fe.sh`가 둘을 한 번에 띄우므로 모드만 맞추면 된다.
+- docker/bare 혼용도 가능하다(예: 워커는 `docker`, FE는 `bare`).
+- Kafka 없이 **직접 색인**만 할 거면 1~3을 `./run.sh index --recreate`로 대체하고 워커는 생략한다.
 
 ### 5) 이미지 확인용 정적 서버 (local 백엔드일 때)
 
@@ -241,6 +362,12 @@ OPENSEARCH_PASSWORD=<master-password>
 | `OPENSEARCH_AWS_SERVICE` | `es` | `iam` 모드 SigV4 서비스명 (Serverless는 `aoss`) |
 | `HS_INDEX_NAME` | `images` | 인덱스 이름 |
 | `HS_SEARCH_PIPELINE` | `hybrid-pipeline` | 하이브리드 search pipeline 이름 |
+| `HS_KAFKA_BOOTSTRAP` | (빈값) | MSK 부트스트랩 (쉼표구분 `host:9092`). `terraform output kafka_bootstrap_brokers_plaintext` |
+| `HS_KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | MSK 비인증+TLS_PLAINTEXT라 PLAINTEXT |
+| `HS_KAFKA_TOPIC` / `HS_KAFKA_DLQ_TOPIC` | `image-events` / `image-events.dlq` | 이벤트 토픽 / DLQ |
+| `HS_KAFKA_CONSUMER_GROUP` | `image-indexer` | consumer 그룹 (파티션 수만큼 수평 확장) |
+| `HS_KAFKA_TOPIC_PARTITIONS` | `2` | 토픽 파티션 수 (= 브로커 수) |
+| `HS_KAFKA_MAX_RETRIES` | `5` | transient 오류 재시도 횟수 (소진 시 DLQ) |
 | `HS_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | 임베딩 모델 |
 | `HS_EMBEDDING_DIM` | `384` | 임베딩 차원 (인덱스 매핑과 일치해야 함) |
 | `HS_API_URL` | `http://localhost:8000` | FE가 호출할 코디네이터 주소 (compose에선 `http://app:8000`) |
@@ -278,12 +405,20 @@ OPENSEARCH_USE_SSL=true
 하이브리드 융합은 크게 두 갈래다 — **score normalization**(현행, `normalization-processor`)과
 **RRF**(Reciprocal Rank Fusion, `score-ranker-processor`). 이 프로젝트는 **normalization을 유지**한다.
 
-| | normalization (현행) | RRF |
+| | min-max normalization + 가중 산술평균 (현행) | RRF |
 |---|---|---|
-| 합치는 기준 | 각 서브쿼리의 **raw 점수** (min-max 정규화 후 가중평균) | 점수 무시, **순위(rank)만** → `Σ 1/(k+rank)` |
+| 합치는 식 | `Σ wᵢ · (sᵢ − minᵢ)/(maxᵢ − minᵢ)` — 점수를 [0,1]로 정규화 후 **가중 산술평균** | `Σ 1/(k + rankᵢ)` — 점수 버리고 **순위만** (k=60 기본) |
+| 합치는 기준 | 각 서브쿼리의 **raw 점수** (정규화해 스케일만 맞춤) | 점수 무시, **순위(rank)만** |
 | 가중치 | 있음 (`0.4 / 0.6`, 요청별 조정 가능) | 기본적으로 의미 약함 (순위 기반) |
 | 튜닝 | 가중치·정규화 튜닝 필요 | 거의 불필요 (스케일 차이에 robust) |
 | OpenSearch | `normalization-processor` (성숙·기본) | `score-ranker-processor` (**2.19+** 필요) |
+
+**언제 갈리나 (예시):** 어떤 문서가 BM25에선 압도적 1위(정규화 `1.0`)인데 kNN에선 10위(정규화 `0.2`)라면 —
+- normalization: `0.4·1.0 + 0.6·0.2 = 0.52` → "키워드로 강하게 맞았다"는 **점수 크기**가 랭킹에 반영된다.
+- RRF(k=60): `1/(60+1) + 1/(60+10) ≈ 0.031` → 1위든 1.0이든 "1위라는 순위"만 반영, 크기 정보는 사라진다.
+
+즉 점수 분포가 한쪽으로 치우칠수록 두 방식의 랭킹이 갈린다. normalization은 신호 세기를 살리고,
+RRF는 스케일이 제각각인 이종 점수(BM25 vs 코사인)를 순위로 평준화해 robust하다.
 
 선택 사유:
 1. **버전/성숙도** — AWS Managed OpenSearch에서 `normalization-processor`는 오래 검증된 기본 방식이고,
@@ -388,4 +523,6 @@ OpenSearch는 단일 노드(`t3.small.search`), 캐시는 코디네이터 프로
 ## 다음 단계
 
 - 결과 캐시를 인메모리 LRU → Redis로 확장(다중 코디네이터 인스턴스 공유).
-- 색인 워커를 Kafka(`media.created`/`media.enriched`) 소비자로 상시 구동(현재는 manifest 드라이버).
+- 실제 업로드/캡셔닝 서비스가 `ImageCreated`/`ImageEnriched`를 직접 발행(현재는 `publish_from_manifest`가 리플레이).
+- MSK 비인증(PLAINTEXT) → IAM/SASL-SCRAM 인증 + TLS(9094)로 전환.
+- DLQ 재처리(리드라이브) 도구 + 워커 메트릭/알람.
